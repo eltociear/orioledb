@@ -1478,6 +1478,8 @@ free_extent_for_checkpoint(BTreeDescr *desc, FileExtent *extent, uint32 chkp_num
 	int			i;
 	bool		success;
 
+	Assert(extent->src == orioledb_current_source_number);
+
 	for (i = 0; i < 2; i++)
 	{
 		/* Don't have *.map files for BTreeStorageTemporary */
@@ -2320,7 +2322,8 @@ checkpointer_update_autonomous(BTreeDescr *desc, CheckpointState *state)
 			header = (BTreePageHeader *) O_GET_IN_MEMORY_PAGE(state->stack[i].blkno);
 
 			header->checkpointNum = 0;
-			if (FileExtentIsValid(page_desc->fileExtent))
+			if (FileExtentIsValid(page_desc->fileExtent) &&
+				page_desc->fileExtent.src == orioledb_current_source_number)
 			{
 				/* the offset will not be used in current checkpoint */
 				free_extent_for_checkpoint(desc, &page_desc->fileExtent, cur_chkp_num);
@@ -2657,6 +2660,7 @@ prepare_checkpoint_step_params(BTreeDescr *descr,
 		pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
 		jsonb_push_int8_key(&state, "offset", DOWNLINK_GET_DISK_OFF(message->content.upwards.diskDownlink));
 		jsonb_push_int8_key(&state, "length", DOWNLINK_GET_DISK_LEN(message->content.upwards.diskDownlink));
+		jsonb_push_int8_key(&state, "source", DOWNLINK_GET_DISK_SOURCE_NUM(message->content.upwards.diskDownlink));
 		pushJsonbValue(&state, WJB_END_OBJECT, NULL);
 		if (message->content.upwards.saveTuple || DiskDownlinkIsValid(message->content.upwards.diskDownlink))
 		{
@@ -2856,7 +2860,8 @@ checkpoint_btree_loop(BTreeDescr **descrPtr,
 				page_desc = O_GET_IN_MEMORY_PAGEDESC(blkno);
 
 				header->checkpointNum = 0;
-				if (FileExtentIsValid(page_desc->fileExtent))
+				if (FileExtentIsValid(page_desc->fileExtent) &&
+					page_desc->fileExtent.src == orioledb_current_source_number)
 				{
 					/* the offset will not be used in current checkpoint */
 					free_extent_for_checkpoint(descr, &page_desc->fileExtent,
@@ -2919,7 +2924,9 @@ checkpoint_btree_loop(BTreeDescr **descrPtr,
 					{
 						elog(ERROR, "unable to perform page IO for page %d to file %s with offset %lu",
 							 blkno,
-							 btree_smgr_filename(descr, page_desc->fileExtent.off),
+							 btree_smgr_filename(descr,
+												 page_desc->fileExtent.src,
+												 page_desc->fileExtent.off),
 							 (uint64) page_desc->fileExtent.off);
 					}
 
@@ -3199,6 +3206,7 @@ autonomous_image_write(BTreeDescr *descr, CheckpointState *state,
 
 	extent.len = InvalidFileExtentLen;
 	extent.off = InvalidFileExtentOff;
+	extent.src = orioledb_current_source_number;
 
 	/* write the image to disk */
 	split_page_by_chunks(descr, img);
@@ -4035,7 +4043,9 @@ checkpoint_internal_pass(BTreeDescr *descr, CheckpointState *state,
 				Assert(page_desc != NULL);
 				elog(ERROR, "Unable to perform page IO for page %d to file %s with offset %lu",
 					 blkno,
-					 btree_smgr_filename(descr, page_desc->fileExtent.off),
+					 btree_smgr_filename(descr,
+										 page_desc->fileExtent.src,
+										 page_desc->fileExtent.off),
 					 (long unsigned) page_desc->fileExtent.off);
 			}
 
@@ -4370,6 +4380,32 @@ checkpointable_tree_fill_seq_buffers(BTreeDescr *td, bool init,
 	return true;
 }
 
+static File
+init_map_file(char *filename, CheckpointFileHeader *file_header)
+{
+	File		file;
+	bool		ferror;
+
+	file = PathNameOpenFile(filename, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+
+	if (file < 0)
+	{
+		ereport(FATAL, (errcode_for_file_access(),
+						errmsg("could not create map file %s", filename)));
+	}
+
+	ferror = OFileWrite(file, (Pointer) file_header, sizeof(*file_header), 0,
+						WAIT_EVENT_SLRU_WRITE) != sizeof(*file_header) ||
+		FileSync(file, WAIT_EVENT_SLRU_SYNC) != 0;
+
+	if (ferror)
+		ereport(FATAL, (errcode_for_file_access(),
+						errmsg("could not to write header to map file %s",
+								filename)));
+
+	return file;
+}
+
 /*
  * Initializes metaPageBlkno information for a B-tree with pages eviction support.
  *
@@ -4401,6 +4437,7 @@ evictable_tree_init_meta(BTreeDescr *desc, EvictedTreeData **evicted_data,
 		SeqBufTag	prev_chkp_tag;
 		bool		prev_chkp_file_exist,
 					ferror = false;
+		uint32		source_num = orioledb_current_source_number;
 
 		memset(&prev_chkp_tag, 0, sizeof(prev_chkp_tag));
 		prev_chkp_tag.datoid = desc->oids.datoid;
@@ -4408,7 +4445,26 @@ evictable_tree_init_meta(BTreeDescr *desc, EvictedTreeData **evicted_data,
 		prev_chkp_tag.num = chkp_num;
 		prev_chkp_tag.type = 'm';
 		prev_chkp_fname = get_seq_buf_filename(&prev_chkp_tag);
+
 		prev_chkp_file = PathNameOpenFile(prev_chkp_fname, O_RDONLY | PG_BINARY);
+
+		/*
+		 * Didn't found the file in the current source.  Search for this file
+		 * in previous sources.
+		 */
+		while (prev_chkp_file < 0 && source_num > 0)
+		{
+			static char		abs_path[MAXPGPATH];
+
+			source_num--;
+			join_path_components(abs_path,
+								 orioledb_sources_locations[source_num].dataDir,
+								 prev_chkp_fname);
+			canonicalize_path(abs_path);
+
+			prev_chkp_file = PathNameOpenFile(abs_path, O_RDONLY | PG_BINARY);
+		}
+
 		prev_chkp_file_exist = prev_chkp_file >= 0;
 
 		if (!prev_chkp_file_exist)
@@ -4422,22 +4478,7 @@ evictable_tree_init_meta(BTreeDescr *desc, EvictedTreeData **evicted_data,
 			file_header.leafPagesNum = 1;
 			file_header.ctid = 0;
 
-			prev_chkp_file = PathNameOpenFile(prev_chkp_fname, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
-
-			if (prev_chkp_file < 0)
-			{
-				ereport(FATAL, (errcode_for_file_access(),
-								errmsg("could not create map file %s", prev_chkp_fname)));
-			}
-
-			ferror = OFileWrite(prev_chkp_file, (Pointer) &file_header, sizeof(file_header), 0,
-								WAIT_EVENT_SLRU_WRITE) != sizeof(file_header) ||
-				FileSync(prev_chkp_file, WAIT_EVENT_SLRU_SYNC) != 0;
-
-			if (ferror)
-				ereport(FATAL, (errcode_for_file_access(),
-								errmsg("could not to write header to map file %s",
-									   prev_chkp_fname)));
+			prev_chkp_file = init_map_file(prev_chkp_fname, &file_header);
 		}
 		else					/* if checkpoint file exist */
 		{
@@ -4468,6 +4509,19 @@ evictable_tree_init_meta(BTreeDescr *desc, EvictedTreeData **evicted_data,
 									errmsg("could not to read header of map file %s",
 										   prev_chkp_fname)));
 				}
+
+				/*
+				 * We don't use free space management from previous sources.
+				 * Just restart it from scratch.
+				 */
+				if (source_num != orioledb_current_source_number)
+				{
+					file_header.numFreeBlocks = 0;
+					file_header.datafileLength = 0;
+
+					FileClose(prev_chkp_file);
+					prev_chkp_file = init_map_file(prev_chkp_fname, &file_header);
+				}
 			}
 		}
 		FileClose(prev_chkp_file);
@@ -4496,12 +4550,15 @@ evictable_tree_init_meta(BTreeDescr *desc, EvictedTreeData **evicted_data,
 
 		rerror = !read_page_from_disk(desc, buf, file_header.rootDownlink, &root_desc->fileExtent);
 
+
 		if (rerror)
 		{
 			unlock_page(desc->rootInfo.rootPageBlkno);
 			ereport(ERROR, (errcode_for_file_access(),
 							errmsg("could not read rootPageBlkno page from %s",
-								   btree_smgr_filename(desc, DOWNLINK_GET_DISK_OFF(file_header.rootDownlink)))));
+								   btree_smgr_filename(desc,
+													   DOWNLINK_GET_DISK_SOURCE_NUM(file_header.rootDownlink),
+													   DOWNLINK_GET_DISK_OFF(file_header.rootDownlink)))));
 		}
 
 		put_page_image(desc->rootInfo.rootPageBlkno, buf);

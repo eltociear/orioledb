@@ -438,6 +438,7 @@ bool
 seq_buf_write_file_extent(SeqBufDescPrivate *private, FileExtent extent)
 {
 	Assert((SEQBUF_CHUNK_SIZE % sizeof(FileExtent)) == 0);
+	Assert(extent.src == orioledb_current_source_number);
 	return seq_buf_rw(private, (char *) &extent, sizeof(FileExtent), true);
 }
 

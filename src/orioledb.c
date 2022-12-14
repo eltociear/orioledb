@@ -80,6 +80,8 @@ static Size main_buffers_offset;
 Pointer		o_shared_buffers = NULL;
 Pointer		o_undo_buffers = NULL;
 OrioleDBPageDesc *page_descs = NULL;
+OrioleDBSourceInfo orioledb_sources_locations[ORIOLEDB_MAX_SOURCES];
+int			orioledb_current_source_number = 0;
 
 /* Custom GUC variables */
 int			main_buffers_guc;
@@ -167,6 +169,8 @@ static ShmemItem shmemItems[] = {
 static Size orioledb_memsize(void);
 static void orioledb_shmem_request(void);
 static void orioledb_shmem_startup(void);
+static char *get_abs_path(const char *path);
+static void read_sources_file(const char *abspath);
 static bool verify_dir_is_empty_or_create(char *dirname, bool *created, bool *found);
 static void orioledb_usercache_hook(Datum arg, Oid arg1, Oid arg2, Oid arg3);
 static void orioledb_error_cleanup_hook(void);
@@ -230,8 +234,9 @@ _PG_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		return;
 
-	verify_dir_is_empty_or_create(pstrdup(ORIOLEDB_DATA_DIR), NULL, NULL);
-	verify_dir_is_empty_or_create(pstrdup(ORIOLEDB_UNDO_DIR), NULL, NULL);
+	verify_dir_is_empty_or_create(get_abs_path(ORIOLEDB_DATA_DIR), NULL, NULL);
+	verify_dir_is_empty_or_create(get_abs_path(ORIOLEDB_UNDO_DIR), NULL, NULL);
+	read_sources_file(get_abs_path(ORIOLEDB_SOURCES_FILE));
 
 	/* See InitializeMaxBackends(), InitProcGlobal() */
 	max_procs = MaxConnections + autovacuum_max_workers + 2 +
@@ -876,6 +881,39 @@ orioledb_check_shmem(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("orioledb must be loaded via shared_preload_libraries")));
+}
+
+static char *
+get_abs_path(const char *path)
+{
+	static char		abs_path[MAXPGPATH];
+
+	join_path_components(abs_path, DataDir, path);
+	canonicalize_path(abs_path);
+
+	return pstrdup(abs_path);
+}
+
+static void
+read_sources_file(const char *abspath)
+{
+	static char		line[MAXPGPATH];
+	FILE	   *fp = AllocateFile(abspath, "r");
+	MemoryContext	cxt = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (!fp)
+		return;
+
+	while (fgets(line, MAXPGPATH, fp))
+	{
+		line[strcspn(line, "\r\n")] = 0;
+		orioledb_sources_locations[orioledb_current_source_number].dataDir =
+			pnstrdup(line, MAXPGPATH);
+		orioledb_current_source_number++;
+	}
+
+	FreeFile(fp);
+	MemoryContextSwitchTo(cxt);
 }
 
 /*

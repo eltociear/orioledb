@@ -39,7 +39,8 @@
 #define SYS_TREES_COLLATION_CACHE		(17)
 #define SYS_TREES_DATABASE_CACHE		(18)
 #define SYS_TREES_AMOP_STRAT_CACHE		(19)
-#define SYS_TREES_NUM					(19)
+#define	SYS_TREES_BRANCHES				(20)
+#define SYS_TREES_NUM					(20)
 
 #define IS_SYS_TREE_OIDS(oids) \
 	((oids).datoid == SYS_TREES_DATOID)
@@ -104,6 +105,12 @@ typedef struct
 	uint64		offset;
 	uint64		length;
 } FreeTreeFileExtent;
+
+typedef struct
+{
+	NameData	branchName;
+	uint32		checkpointNum;
+} OBranch;
 
 /*
  * Tuple stored in a free B-tree nodes and tuples.

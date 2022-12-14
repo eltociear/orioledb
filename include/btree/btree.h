@@ -149,7 +149,7 @@ struct BTreeDescr
 {
 	BTreeRootInfo rootInfo;
 	void	   *arg;
-	OSmgr		smgr;
+	OSmgr		smgrs[ORIOLEDB_MAX_SOURCES];
 	ORelOids	oids;
 	OIndexType	type;
 	OPagePool  *ppool;

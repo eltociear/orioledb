@@ -119,6 +119,16 @@ static void free_tree_print(BTreeDescr *desc, StringInfo buf,
 static JsonbValue *free_tree_key_to_jsonb(BTreeDescr *desc, OTuple tup,
 										  JsonbParseState **state);
 
+static int	o_name_cmp(BTreeDescr *desc,
+					   void *p1, BTreeKeyType k1,
+					   void *p2, BTreeKeyType k2);
+static void o_name_print(BTreeDescr *desc, StringInfo buf,
+						 OTuple tup, Pointer arg);
+static void o_branch_print(BTreeDescr *desc, StringInfo buf,
+						   OTuple tup, Pointer arg);
+static JsonbValue *o_name_to_jsonb(BTreeDescr *desc, OTuple tup,
+								   JsonbParseState **state);
+
 
 static SysTreeMeta sysTreesMeta[] =
 {
@@ -353,6 +363,18 @@ static SysTreeMeta sysTreesMeta[] =
 		.keyPrint = o_sys_cache_key_print,
 		.tupPrint = o_amop_strat_cache_tup_print,
 		.keyToJsonb = o_sys_cache_key_to_jsonb,
+		.poolType = OPagePoolCatalog,
+		.undoReserveType = UndoReserveTxn,
+		.storageType = BTreeStoragePersistence,
+		.needs_undo = NULL
+	},
+	{							/* SYS_TREES_BRANCHES */
+		.keyLength = sizeof(NameData),
+		.tupleLength = sizeof(OBranch),
+		.cmpFunc = o_name_cmp,
+		.keyPrint = o_name_print,
+		.tupPrint = o_branch_print,
+		.keyToJsonb = o_name_to_jsonb,
 		.poolType = OPagePoolCatalog,
 		.undoReserveType = UndoReserveTxn,
 		.storageType = BTreeStoragePersistence,
@@ -1093,5 +1115,47 @@ free_tree_key_to_jsonb(BTreeDescr *desc, OTuple tup, JsonbParseState **state)
 	jsonb_push_int8_key(state, "relnode", key->relnode);
 	jsonb_push_int8_key(state, "offset", key->extent.offset);
 	jsonb_push_int8_key(state, "length", key->extent.length);
+	return pushJsonbValue(state, WJB_END_OBJECT, NULL);
+}
+
+static int
+o_name_cmp(BTreeDescr *desc,
+		   void *p1, BTreeKeyType k1,
+		   void *p2, BTreeKeyType k2)
+{
+	NameData *name1 = (NameData *) (((OTuple *) p1)->data);
+	NameData *name2 = (NameData *) (((OTuple *) p2)->data);
+
+	return memcmp(name1, name2, sizeof(NameData));
+}
+
+static void
+o_name_print(BTreeDescr *desc, StringInfo buf,
+			 OTuple tup, Pointer arg)
+{
+	NameData *name = (NameData *) (tup.data);
+
+	appendStringInfo(buf, "(\"%s\")", name->data);
+}
+
+static void
+o_branch_print(BTreeDescr *desc, StringInfo buf,
+			   OTuple tup, Pointer arg)
+{
+	OBranch *branch = (OBranch *) (tup.data);
+
+	appendStringInfo(buf, "(\"%s\", %u)",
+					 branch->branchName.data,
+					 branch->checkpointNum);
+}
+
+static JsonbValue *
+o_name_to_jsonb(BTreeDescr *desc, OTuple tup,
+				JsonbParseState **state)
+{
+	NameData *name = (NameData *) (tup.data);
+
+	(void) pushJsonbValue(state, WJB_BEGIN_OBJECT, NULL);
+	jsonb_push_string_key(state, "name", name->data);
 	return pushJsonbValue(state, WJB_END_OBJECT, NULL);
 }

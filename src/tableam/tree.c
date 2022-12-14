@@ -86,6 +86,8 @@ void
 index_btree_desc_init(BTreeDescr *desc, OCompress compress, ORelOids oids,
 					  OIndexType type, OXid createOxid, void *arg)
 {
+	int		i;
+
 	if (type == oIndexPrimary)
 		desc->ops = &primaryOps;
 	else if (type == oIndexToast)
@@ -100,8 +102,6 @@ index_btree_desc_init(BTreeDescr *desc, OCompress compress, ORelOids oids,
 	desc->rootInfo.rootPageBlkno = OInvalidInMemoryBlkno;
 	desc->rootInfo.metaPageBlkno = OInvalidInMemoryBlkno;
 	desc->rootInfo.rootPageChangeCount = 0;
-	desc->smgr.files = NULL;
-	desc->smgr.filesAllocated = 0;
 	desc->freeBuf.file = -1;
 	desc->nextChkp[0].file = -1;
 	desc->nextChkp[1].file = -1;
@@ -111,6 +111,12 @@ index_btree_desc_init(BTreeDescr *desc, OCompress compress, ORelOids oids,
 	desc->storageType = BTreeStoragePersistence;
 	desc->undoType = UndoReserveTxn;
 	desc->createOxid = createOxid;
+
+	for (i = 0; i < ORIOLEDB_MAX_SOURCES; i++)
+	{
+		desc->smgrs[i].files = NULL;
+		desc->smgrs[i].filesAllocated = 0;
+	}
 }
 
 static inline OIndexDescr *

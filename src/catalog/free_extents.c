@@ -100,6 +100,7 @@ get_extent(BTreeDescr *desc, uint16 len)
 			result.off = orioledb_device_alloc(desc, len * ORIOLEDB_COMP_BLCKSZ) / ORIOLEDB_COMP_BLCKSZ;
 		else
 			result.off = pg_atomic_fetch_add_u64(&metaPage->datafileLength, len);
+		result.src = orioledb_current_source_number;
 		return result;
 	}
 
@@ -258,6 +259,7 @@ get_extent(BTreeDescr *desc, uint16 len)
 
 	result.off = deleted_tup.extent.offset;
 	result.len = len;
+	result.src = orioledb_current_source_number;
 
 	enable_stopevents = old_enable_stopevents;
 	return result;
@@ -524,13 +526,13 @@ foreach_free_extent(BTreeDescr *desc, ForEachExtentCallback callback, void *arg)
 		Assert(cur->relnode == desc->oids.relnode);
 
 		/* FreeTreeFileExtent.length may be more than FileExtent.len */
-		while (cur->extent.length > UINT16_MAX)
+		while (cur->extent.length > FreeExtentMaxLen)
 		{
 			cur_extent.off = cur->extent.offset;
-			cur_extent.len = UINT16_MAX;
+			cur_extent.len = FreeExtentMaxLen;
 			callback(desc, cur_extent, arg);
-			cur->extent.offset += UINT16_MAX;
-			cur->extent.length -= UINT16_MAX;
+			cur->extent.offset += FreeExtentMaxLen;
+			cur->extent.length -= FreeExtentMaxLen;
 		}
 		cur_extent.off = cur->extent.offset;
 		cur_extent.len = cur->extent.length;

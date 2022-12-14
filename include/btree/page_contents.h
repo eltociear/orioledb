@@ -273,9 +273,16 @@ typedef struct
 #define MAKE_IO_DOWNLINK(locknum) ((uint64)(locknum) | DOWNLINK_IO_BUF_MASK)
 #define DOWNLINK_GET_IO_LOCKNUM(downlink) ((uint32) ((downlink) & UINT64CONST(0xFFFFFFFF)))
 
-#define MAKE_ON_DISK_DOWNLINK(extent) (((uint64)((extent).len) << 48) | (uint64)((extent).off) | DOWNLINK_DISK_BIT)
-#define DOWNLINK_GET_DISK_OFF(downlink) ((uint64) ((downlink) & UINT64CONST(0xFFFFFFFFFFFF)))
-#define DOWNLINK_GET_DISK_LEN(downlink) ((uint16) (((downlink) & UINT64CONST(0x7FFF000000000000)) >> 48))
+#define MAKE_ON_DISK_DOWNLINK(extent) \
+	(DOWNLINK_DISK_BIT | \
+	 ((uint64)((extent).src) << 60) | \
+	 ((uint64)((extent).len) << 45) | \
+	 (uint64)((extent).off))
+#define DOWNLINK_GET_DISK_OFF(downlink) ((uint64) ((downlink) & UINT64CONST(0x1FFFFFFFFFFF)))
+#define DOWNLINK_GET_DISK_LEN(downlink) ((uint16) (((downlink) >> 45) & 0x7FFF))
+#define DOWNLINK_GET_DISK_SOURCE_NUM(downlink) ((uint32) (((downlink) >> 60) & 0x7))
+#define DOWNLINK_IS_CURRENT_SOURCE(downlink) \
+	(DOWNLINK_GET_DISK_SOURCE_NUM(downlink) == orioledb_current_source_number)
 #define InvalidDiskDownlink UINT64_MAX
 #define DiskDownlinkIsValid(downlink) ((downlink) != InvalidDiskDownlink)
 

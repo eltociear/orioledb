@@ -14,10 +14,26 @@ import base64
 import inspect
 import tempfile
 
-from threading import Thread
+from shutil import copytree
+from tempfile import mkdtemp
+from testgres.backup import \
+	NodeBackup, \
+	BackupException
 from testgres.enums import NodeStatus
-from testgres.consts import PG_CONF_FILE
 from testgres.utils import get_pg_version, get_pg_config
+from testgres.defaults import default_username
+from testgres.consts import \
+	DATA_DIR, \
+	TMP_BACKUP, \
+	PG_CONF_FILE
+from testgres.utils import get_pg_version
+from threading import Thread
+
+def ignore_branching_data(path, names):
+	if not path.endswith('/orioledb_data'):
+		return set()
+	return set(name for name in names
+				if not name.endswith('control') and not name.endswith('.xid'))
 
 class BaseTest(unittest.TestCase):
 	replica = None
@@ -47,6 +63,19 @@ class BaseTest(unittest.TestCase):
 			replica.append_conf(filename=PG_CONF_FILE, port=replica.port)
 			self.replica = replica
 		return self.replica
+
+	def getBranch(self):
+		backup = FileBackup(node=self.node, ignore=ignore_branching_data)
+
+		with open(os.path.join(backup.base_dir, DATA_DIR, 'orioledb_sources'), 'wt') as f:
+			f.write(self.node.data_dir)
+			f.write('\n')
+		branch = backup.spawn_primary('replica')
+		branch.port = self.getBasePort() + 1
+		branch.append_conf(filename=PG_CONF_FILE, line='\n')
+		branch.append_conf(filename=PG_CONF_FILE, port=branch.port)
+		self.replica = branch
+		return branch
 
 	def setUp(self):
 		name = os.path.basename(inspect.getfile(self.__class__))
@@ -142,6 +171,45 @@ class BaseTest(unittest.TestCase):
 		replica.catchup()
 		replica.poll_query_until("SELECT orioledb_recovery_synchronized();",
 								 expected = True)
+
+class FileBackup(NodeBackup):
+	def __init__(self,
+				 node,
+				 base_dir=None,
+				 username=None,
+				 ignore=None):
+		"""
+		Create a new backup.
+
+		Args:
+			node: :class:`.PostgresNode` we're going to backup.
+			base_dir: where should we store it?
+			username: database user name.
+		"""
+
+		# Set default arguments
+		username = username or default_username()
+		base_dir = base_dir or mkdtemp(prefix=TMP_BACKUP)
+
+		# public
+		self.original_node = node
+		self.base_dir = base_dir
+		self.username = username
+
+		# private
+		self._available = True
+
+		data_dir = os.path.join(self.base_dir, DATA_DIR)
+
+		if not node.status():
+			copytree(node.data_dir, data_dir, ignore=ignore)
+		else:
+			con = node.connect()
+			con.execute("SELECT pg_backup_start('backup', true);")
+			copytree(node.data_dir, data_dir, ignore=ignore)
+			con.execute("SELECT pg_backup_stop();")
+			con.close()
+			os.remove(os.path.join(data_dir, 'postmaster.pid'))
 
 # execute SQL query Thread for PostgreSql node's connection
 class ThreadQueryExecutor(Thread):

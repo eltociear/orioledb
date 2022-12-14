@@ -260,6 +260,7 @@ put_item_to_stack(BTreeDescr *desc, OIndexBuildStackItem *stack, int level,
 
 		extent.len = InvalidFileExtentLen;
 		extent.off = InvalidFileExtentOff;
+		extent.src = orioledb_current_source_number;
 
 		VALGRIND_CHECK_MEM_IS_DEFINED(stack[level].img, ORIOLEDB_BLCKSZ);
 
@@ -379,6 +380,7 @@ btree_write_index_data(BTreeDescr *desc, TupleDesc tupdesc,
 
 		extent.len = InvalidFileExtentLen;
 		extent.off = InvalidFileExtentOff;
+		extent.src = orioledb_current_source_number;
 
 		VALGRIND_CHECK_MEM_IS_DEFINED(stack[i].img, ORIOLEDB_BLCKSZ);
 
@@ -411,6 +413,7 @@ btree_write_index_data(BTreeDescr *desc, TupleDesc tupdesc,
 
 	extent.len = InvalidFileExtentLen;
 	extent.off = InvalidFileExtentOff;
+	extent.src = orioledb_current_source_number;
 
 	VALGRIND_CHECK_MEM_IS_DEFINED(root_page, ORIOLEDB_BLCKSZ);
 

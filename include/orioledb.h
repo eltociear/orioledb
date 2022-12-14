@@ -35,6 +35,8 @@
 #define ORIOLEDB_BINARY_VERSION 4
 #define ORIOLEDB_DATA_DIR "orioledb_data"
 #define ORIOLEDB_UNDO_DIR "orioledb_undo"
+#define ORIOLEDB_SOURCES_FILE "orioledb_sources"
+#define ORIOLEDB_MAX_SOURCES (8)
 #define ORIOLEDB_EVT_EXTENSION "evt"
 #define ORIOLEDB_RMGR_ID (129)
 #define ORIOLEDB_XLOG_CONTAINER (0x00)
@@ -164,12 +166,14 @@ typedef RelFileLocator RelFileNode;
 
 typedef struct
 {
-	uint64		len:16,
-				off:48;
+	uint64		len:15,
+				off:45,
+				src:3;
 } FileExtent;
 
 #define InvalidFileExtentLen (0)
-#define InvalidFileExtentOff (UINT64CONST(0xFFFFFFFFFFFF))
+#define InvalidFileExtentOff (UINT64CONST(0x1FFFFFFFFFFF))
+#define FreeExtentMaxLen (0x7FFF)
 #define FileExtentLenIsValid(len) ((len) != InvalidFileExtentLen)
 #define FileExtentOffIsValid(off) ((off) < InvalidFileExtentOff)
 #define FileExtentIsValid(extent) (FileExtentLenIsValid((extent).len) && FileExtentOffIsValid((extent).off))
@@ -202,7 +206,7 @@ typedef struct
 #define O_PAGE_HEADER_SIZE		sizeof(OrioleDBPageHeader)
 #define O_PAGE_HEADER(page)	((OrioleDBPageHeader *)(page))
 
-#define O_PAGE_CHANGE_COUNT_MAX		(0x7FFFFFFF)
+#define O_PAGE_CHANGE_COUNT_MAX		(0x0FFFFFFF)
 #define InvalidOPageChangeCount		(O_PAGE_CHANGE_COUNT_MAX)
 #define O_PAGE_CHANGE_COUNT_INC(page) \
 	if (O_PAGE_HEADER(page)->pageChangeCount >= O_PAGE_CHANGE_COUNT_MAX) \
@@ -210,6 +214,11 @@ typedef struct
 	else \
 		O_PAGE_HEADER(page)->pageChangeCount++;
 #define O_PAGE_GET_CHANGE_COUNT(p) (O_PAGE_HEADER(p)->pageChangeCount)
+
+typedef struct
+{
+	char	   *dataDir;
+} OrioleDBSourceInfo;
 
 /* orioledb.c */
 extern Size orioledb_buffers_size;
@@ -240,6 +249,9 @@ extern int	default_toast_compress;
 #if PG_VERSION_NUM >= 140000
 extern bool orioledb_table_description_compress;
 #endif
+extern OrioleDBSourceInfo orioledb_sources_locations[ORIOLEDB_MAX_SOURCES];
+extern int	orioledb_current_source_number;
+
 
 #define GET_CUR_PROCDATA() \
 	(AssertMacro(MyProc->pgprocno >= 0 && \

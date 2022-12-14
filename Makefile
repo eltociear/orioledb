@@ -43,6 +43,7 @@ OBJS = src/btree/btree.o \
 	   src/catalog/o_tables.o \
 	   src/catalog/o_type_cache.o \
 	   src/catalog/sys_trees.o \
+	   src/checkpoint/branching.o \
 	   src/checkpoint/checkpoint.o \
 	   src/orioledb.o \
 	   src/recovery/recovery.o \
@@ -163,7 +164,8 @@ TESTGRESCHECKS_PART_2 = t/checkpoint_concurrent_test.py \
 						t/reindex_test.py \
 						t/schema_test.py \
 						t/trigger_test.py \
-						t/vacuum_test.py
+						t/vacuum_test.py \
+						t/branching_test.py
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

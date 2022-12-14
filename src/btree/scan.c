@@ -368,13 +368,22 @@ cmp_downlinks(const void *p1, const void *p2)
 {
 	uint64		d1 = ((BTreeSeqScanDiskDownlink *) p1)->downlink;
 	uint64		d2 = ((BTreeSeqScanDiskDownlink *) p2)->downlink;
+	uint64		off1 = DOWNLINK_GET_DISK_OFF(d1);
+	uint64		off2 = DOWNLINK_GET_DISK_OFF(d2);
+	int			src1 = DOWNLINK_GET_DISK_SOURCE_NUM(d1);
+	int			src2 = DOWNLINK_GET_DISK_SOURCE_NUM(d2);
 
-	if (d1 < d2)
+	if (src1 < src2)
 		return -1;
-	else if (d1 == d2)
-		return 0;
-	else
+	else if (src1 > src2)
 		return 1;
+
+	if (off1 < off2)
+		return -1;
+	else if (off1 > off2)
+		return 1;
+
+	return 0;
 }
 
 static void
