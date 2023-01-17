@@ -1093,6 +1093,7 @@ BTreeSeqScan *
 make_btree_seq_scan_cb(BTreeDescr *desc, CommitSeqNo csn,
 					   BTreeSeqScanCallbacks *cb, void *arg)
 {
+	o_btree_load_shmem(desc);
 	return make_btree_seq_scan_internal(desc, csn, cb, arg, NULL, NULL);
 }
 
