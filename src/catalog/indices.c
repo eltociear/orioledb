@@ -931,7 +931,7 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
  */
 static void
 _o_index_parallel_scan_and_sort(BTSpool *btspool, BTShared *btshared, Sharedsort *sharedsort,
-						   int sortmem, bool progress)
+						   int sortmem, bool progress, void* worker_heap_scan)
 {
 	SortCoordinate coordinate;
 	BTBuildState buildstate;
@@ -965,10 +965,10 @@ _o_index_parallel_scan_and_sort(BTSpool *btspool, BTShared *btshared, Sharedsort
 									ParallelTableScanFromBTShared(btshared));
 
 	/* TODO make abstraction over scan_getnextslot_allattrs */
-	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
+//	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
 									   true, progress, _bt_build_callback,
 									   (void *) &buildstate, scan);
-
+	reltuples = pscan->worker_heap_scan();
 	/* Execute this worker's part of the sort */
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
@@ -1017,37 +1017,16 @@ bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
 	return true;
 }
 
-void
-build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
+/* Makes heapscan on a worker (and on a leader? )*/
+double
+build_secondary_index_worker_heap_scan()
 {
-	void		*sscan;
-	OIndexDescr *idx;
-	Tuplesortstate *sortstate;
-	TupleTableSlot *primarySlot;
-	Relation	tableRelation,
-				indexRelation = NULL;
 	double		heap_tuples,
 				index_tuples;
 	uint64		ctid;
-	CheckpointFileHeader fileHeader;
-	Size 		pscanSize;
-	ParallelTableScanDesc pscan;
-	/* Infrastructure for parallel build corresponds to _bt_spools_heapscan */
-	BTSpool    	*btspool = (BTSpool *) palloc0(sizeof(BTSpool));
-	BTBuildState *buildstate = (BTBuildState *) palloc0(sizeof(BTBuildState));
-	// In btree build state comes from caller !?
-	SortCoordinate coordinate = NULL;
+	OIndexDescr *idx = pscan->idx;
 
-	btspool->heap = table_open(o_table->oids.reloid, AccessSharedLock);
-	btsoppl->index = index_open(o_table->indices[ix_num].oids.reloid,
-								   AccessSharedLock); // Can we avoid opening index so early?
-	buildstate->spool = btspool;
-
-	/* Attempt to launch parallel worker scan when required */
-	if (indexInfo->ii_ParallelWorkers > 0)
-		_o_index_begin_parallel(buildstate, indexInfo->ii_Concurrent,
-						   indexInfo->ii_ParallelWorkers);
-
+	/* XXX where to use it? */
 	/*
 	 * If parallel build requested and at least one worker process was
 	 * successfully launched, set up coordination state
@@ -1061,8 +1040,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 		coordinate->sharedsort = buildstate->btleader->sharedsort;
 	}
 
-	idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
-	sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, NULL);
 	sscan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, COMMITSEQNO_INPROGRESS, pscan);
 	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
 
@@ -1093,6 +1070,43 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	}
 	ExecDropSingleTupleTableSlot(primarySlot);
 	free_btree_seq_scan(sscan);
+
+	return ntuples;
+}
+
+void
+build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
+{
+	void		*sscan;
+	OIndexDescr *idx;
+	Tuplesortstate *sortstate;
+	TupleTableSlot *primarySlot;
+	Relation	tableRelation,
+				indexRelation = NULL;
+	CheckpointFileHeader fileHeader;
+	Size 		pscanSize;
+	ParallelTableScanDesc pscan;
+	/* Infrastructure for parallel build corresponds to _bt_spools_heapscan */
+	BTSpool    	*btspool = (BTSpool *) palloc0(sizeof(BTSpool));
+	BTBuildState *buildstate = (BTBuildState *) palloc0(sizeof(BTBuildState));
+	// In btree build state comes from caller !?
+	SortCoordinate coordinate = NULL;
+
+	btspool->heap = table_open(o_table->oids.reloid, AccessSharedLock);
+	btsoppl->index = index_open(o_table->indices[ix_num].oids.reloid,
+								   AccessSharedLock); // Can we avoid opening index so early?
+	buildstate->spool = btspool;
+	/* save data needed for workers */
+	pscan->worker_heap_scan = build_secondary_index_worker_heap_scan;
+	pscan->idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
+
+	/* final sort on a leader */
+	sortstate = tuplesort_begin_orioledb_index(pscan->idx, work_mem, false, NULL);
+
+	/* Attempt to launch parallel worker scan when required */
+	if (indexInfo->ii_ParallelWorkers > 0)
+		_o_index_begin_parallel(buildstate, indexInfo->ii_Concurrent,
+						   indexInfo->ii_ParallelWorkers);
 
 	tuplesort_performsort(sortstate);
 
@@ -1128,6 +1142,11 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	}
 }
 
+/* TODO */
+rebuild_index_worker_heap_scan()
+{
+
+}
 
 void
 rebuild_indices(OTable *old_o_table, OTableDescr *old_descr,
@@ -1145,6 +1164,10 @@ rebuild_indices(OTable *old_o_table, OTableDescr *old_descr,
 	uint64		ctid;
 	CheckpointFileHeader *fileHeaders;
 	CheckpointFileHeader toastFileHeader;
+	Size        pscanSize;
+	ParallelTableScanDesc pscan;
+
+	pscan->worker_heap_scan = rebuild_index_worker_heap_scan;
 
 	sortstates = (Tuplesortstate **) palloc(sizeof(Tuplesortstate *) *
 											descr->nIndices);
