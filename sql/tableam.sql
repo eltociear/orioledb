@@ -889,5 +889,12 @@ SELECT count(*) FROM o_ctid_test;
 DELETE FROM o_ctid_test WHERE val_1 != 0;
 SELECT * FROM o_ctid_test;
 
+BEGIN;
+CREATE TEMPORARY TABLE o_test_2 (val_1, val_2) USING orioledb
+    ON COMMIT DROP
+    AS (SELECT val_1, val_1 + 100 FROM generate_series (1, 5) val_1);
+SELECT * FROM o_test_2;
+COMMIT;
+
 DROP FUNCTION smart_explain;
 DROP EXTENSION orioledb CASCADE;
