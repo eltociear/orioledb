@@ -935,9 +935,9 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Prepare to track buffer usage during parallel execution */
 	InstrStartParallelQuery();
 
-	/* Perform sorting of spool, and possibly a spool2 */
+	/* Perform sorting of spool */
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
-	until workers end the sacns */_o_index_parallel_scan_and_sort(btspool, btshared, sharedsort,
+	_o_index_parallel_scan_and_sort(btspool, btshared, sharedsort,
 							   sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */
@@ -1161,7 +1161,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 										   NULL);
 	else
 	{
-		/* Wait until workers end the sacns */
+		/* Wait until workers end their scans */
 		reltuples = _o_index_parallel_heapscan(buildstate,
 										  &indexInfo->ii_BrokenHotChain);
 
