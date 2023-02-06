@@ -688,6 +688,50 @@ _o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot)
 					table_parallelscan_estimate(heap, snapshot));
 }
 
+/* Private copy just because _bt_parallel_heap_scan is static */
+/* TODO Determine that orioledb scan is finished (instead of bt_scan) */
+/*
+ * Within leader, wait for end of heap scan.
+ *
+ * When called, parallel heap scan started by _bt_begin_parallel() will
+ * already be underway within worker processes (when leader participates
+ * as a worker, we should end up here just as workers are finishing).
+ *
+ * Fills in fields needed for ambuild statistics, and lets caller set
+ * field indicating that some worker encountered a broken HOT chain.
+ *
+ * Returns the total number of heap tuples scanned.
+ */
+static double
+_o_index_parallel_heapscan(BTBuildState *buildstate, bool *brokenhotchain)
+{
+	BTShared   *btshared = buildstate->btleader->btshared;
+	int			nparticipanttuplesorts;
+	double		reltuples;
+
+	nparticipanttuplesorts = buildstate->btleader->nparticipanttuplesorts;
+	for (;;)
+	{
+		SpinLockAcquire(&btshared->mutex);
+		if (btshared->nparticipantsdone == nparticipanttuplesorts)
+		{
+			buildstate->havedead = btshared->havedead;
+			buildstate->indtuples = btshared->indtuples;
+			*brokenhotchain = btshared->brokenhotchain;
+			reltuples = btshared->reltuples;
+			SpinLockRelease(&btshared->mutex);
+			break;
+		}
+		SpinLockRelease(&btshared->mutex);
+
+		ConditionVariableSleep(&btshared->workersdonecv,
+							   WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	}
+
+	ConditionVariableCancelSleep();
+
+	return reltuples;
+}
 
 /* Private copy of _bt_leader_participate_as_worker which is static in PG.
  * - Calls o_index_parallel_scan_and_sort instead of _bt_parallel_scan_and_sort
@@ -801,7 +845,7 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Perform sorting of spool, and possibly a spool2 */
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
-	_o_index_parallel_scan_and_sort(btspool, btshared, sharedsort,
+	until workers end the sacns */_o_index_parallel_scan_and_sort(btspool, btshared, sharedsort,
 							   sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */
@@ -857,7 +901,7 @@ _o_index_parallel_scan_and_sort(BTSpool *btspool, BTShared *btshared, Sharedsort
 	btspool->sortstate = tuplesort_begin_orioledb_index(btspool->index,
 														work_mem, false, coordinate);
 
-	/* Fill in buildstate for _bt_build_callback() */
+	/* Fill in buildstate for _o_index_build_callback() */
 	buildstate.isunique = btshared->isunique;
 	buildstate.havedead = false;
 	buildstate.heap = btspool->heap;
@@ -872,11 +916,13 @@ _o_index_parallel_scan_and_sort(BTSpool *btspool, BTShared *btshared, Sharedsort
 	scan = table_beginscan_parallel(btspool->heap,
 									ParallelTableScanFromBTShared(btshared));
 
-	/* TODO make abstraction over scan_getnextslot_allattrs */
-//	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
-									   true, progress, _bt_build_callback,
+	/*
+	 * Call build_secondary_index_worker_heap_scan() or
+	 * rebuild_index_worker_heap_scan();
+	 */
+	reltuples = pscan->worker_heap_scan(btspool->heap, btspool->index, indexInfo,
+										true, progress, _o_index_build_callback,
 									   (void *) &buildstate, scan);
-	reltuples = pscan->worker_heap_scan();
 	/* Execute this worker's part of the sort */
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
@@ -933,20 +979,6 @@ build_secondary_index_worker_heap_scan()
 	uint64		ctid;
 	OIndexDescr *idx = pscan->idx;
 
-	/* XXX where to use it? */
-	/*
-	 * If parallel build requested and at least one worker process was
-	 * successfully launched, set up coordination state
-	 */
-	if (buildstate->btleader)
-	{
-		coordinate = (SortCoordinate) palloc0(sizeof(SortCoordinateData));
-		coordinate->isWorker = false;
-		coordinate->nParticipants =
-			buildstate->btleader->nparticipanttuplesorts;
-		coordinate->sharedsort = buildstate->btleader->sharedsort;
-	}
-
 	sscan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, COMMITSEQNO_INPROGRESS, pscan);
 	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
 
@@ -998,13 +1030,38 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	pscan->worker_heap_scan = build_secondary_index_worker_heap_scan;
 	pscan->idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
 
-	/* final sort on a leader */
-	sortstate = tuplesort_begin_orioledb_index(pscan->idx, work_mem, false, NULL);
 
 	/* Attempt to launch parallel worker scan when required */
 	if (indexInfo->ii_ParallelWorkers > 0)
 		_o_index_begin_parallel(buildstate, indexInfo->ii_Concurrent,
 						   indexInfo->ii_ParallelWorkers);
+
+	/*
+	 * If parallel build requested and at least one worker process was
+	 * successfully launched, set up coordination state
+	 */
+	if (buildstate->btleader)
+	{
+		coordinate = (SortCoordinate) palloc0(sizeof(SortCoordinateData));
+		coordinate->isWorker = false;
+		coordinate->nParticipants =
+			buildstate->btleader->nparticipanttuplesorts;
+		coordinate->sharedsort = buildstate->btleader->sharedsort;
+	}
+
+	/* Begin serial/leader tuplesort. */
+	sortstate = tuplesort_begin_orioledb_index(pscan->idx, work_mem, false, coordinate);
+
+	/* Fill spool using either serial or parallel heap scan */
+	if (!buildstate->btleader)
+		reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
+										   _o_index_build_callback, (void *) buildstate,
+										   NULL);
+	else
+	{
+		/* Wait until workers end the sacns */
+		reltuples = _o_index_parallel_heapscan(buildstate,
+										  &indexInfo->ii_BrokenHotChain);
 
 	tuplesort_performsort(sortstate);
 
@@ -1039,6 +1096,34 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 		index_close(indexRelation, AccessExclusiveLock);
 	}
 }
+
+/*
+ * Per-tuple callback for build_secondary_index_worker_heap_scan/rebuild_index_worker_heap_scan
+ */
+static void
+_o_index_build_callback(ItemPointer tid,
+				   		Datum *values,
+				   		bool *isnull,
+				   		bool tupleIsAlive,
+				   		void *state)
+{
+	BTBuildState *buildstate = (BTBuildState *) state;
+
+	/*
+	 * insert the index tuple into the appropriate spool file for subsequent
+	 * processing
+	 */
+	if (tupleIsAlive)
+		tuplesort_putindextuplevalues(buildstate->spool->sortstate, buildstate->spool->index,
+								  tid, values, isnull);
+	else
+		/* May be not needed */
+		buildstate->havedead = true;
+
+	buildstate->indtuples += 1;
+}
+
+
 
 /* TODO */
 rebuild_index_worker_heap_scan()

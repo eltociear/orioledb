@@ -979,7 +979,7 @@ make_btree_seq_scan_internal(BTreeDescr *desc, CommitSeqNo csn,
 	bool		checkpointConcurrent;
 	BTreeMetaPage *metaPageBlkno = BTREE_GET_META(desc);
 
-	if (poscan)
+	if (poscan && poscan->coordinate == NULL)
 	{
 		SpinLockAcquire(&poscan->workerStart);
 		for (scan->workerNumber = 0; poscan->worker_active[scan->workerNumber] == true; scan->workerNumber++)
@@ -998,6 +998,13 @@ make_btree_seq_scan_internal(BTreeDescr *desc, CommitSeqNo csn,
 		SpinLockRelease(&poscan->workerStart);
 
 		elog(DEBUG3, "make_btree_seq_scan_internal. %s %d started", poscan ? "Parallel worker" : "Worker", scan->workerNumber);
+	}
+	else if (poscan && poscan->coordinate != NULL)
+	{
+		/* Parallel scan called for index build. Leader and workers already joined */
+		scan->isLeader = !(poscan->coordinate->isWorker);
+		Assert(poscan->nworkers == coordinate->nParticipants);
+		elog(DEBUG2, "make_btree_seq_scan_internal. %s %d started for index build", poscan ? "Parallel worker" : "Worker", scan->workerNumber);
 	}
 	else
 	{
