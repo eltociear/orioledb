@@ -183,6 +183,16 @@ typedef BTreeIntPageParallelData *BTreeIntPageParallel;
 #define CUR_PAGE(poscan)	(&(poscan)->intPage[((poscan)->flags & O_PARALLEL_CURRENT_PAGE) ? 0 : 1])
 #define NEXT_PAGE(poscan)	(&(poscan)->intPage[((poscan)->flags & O_PARALLEL_CURRENT_PAGE) ? 1 : 0])
 
+typedef struct oIdxSharedData
+{
+	BTShared		base;
+	double 			*worker_heap_scan_fn;
+	OTableDescr 	*descr;
+	OIndexDescr 	*idx;
+} OIdxSharedData;
+
+typedef oIdxSharedData *oIdxShared;
+
 typedef struct ParallelOScanDescData
 {
 	ParallelTableScanDescData phs_base; /* Shared AM-independent state for
