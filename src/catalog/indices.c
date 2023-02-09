@@ -186,7 +186,6 @@ typedef struct oIdxLeader
 	 */
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
-	Sharedsort *sharedsort2;
 	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
@@ -920,7 +919,6 @@ _o_index_begin_parallel(OIdxBuildState buildstate, bool isconcurrent, int reques
 		btleader->nparticipanttuplesorts++;
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
-	btleader->sharedsort2 = NULL; // Not used anywhere
 	btleader->snapshot = snapshot;
 	btleader->walusage = walusage;
 	btleader->bufferusage = bufferusage;
@@ -1158,7 +1156,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, OIdxShared btshared, Shareds
 						   int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
-	BuildState buildstate;
+	oIdxBuildState buildstate;
 	TableScanDesc scan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
@@ -1186,7 +1184,6 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, OIdxShared btshared, Shareds
 	indexInfo = BuildIndexInfo(btspool->index);
 	indexInfo->ii_Concurrent = btshared->isconcurrent;
 	pscan = ParallelTableScanFromoIdxShared(btshared);
-	scan = table_beginscan_parallel(btspool->heap, pscan);
 	/*
 	 * Call build_secondary_index_worker_heap_scan() or
 	 * rebuild_index_worker_heap_scan();
@@ -1301,7 +1298,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	/* Infrastructure for parallel build corresponds to _bt_spools_heapscan */
 	ParallelOScanDesc pscan;
 	oIdxSpool    	*btspool;
-	oIdxBuildState buildstate;
+	oIdxBuildState  *buildstate;
 	SortCoordinate coordinate = NULL;
 	uint64		ctid;
 
