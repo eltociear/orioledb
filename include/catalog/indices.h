@@ -42,5 +42,6 @@ extern void assign_new_oids(OTable *oTable, Relation rel);
 extern void recreate_o_table(OTable *old_o_table, OTable *o_table);
 extern void build_secondary_index(OTable *o_table, OTableDescr *descr,
 								  OIndexNumber ix_num);
+extern void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc);
 
 #endif							/* __INDICES_H__ */

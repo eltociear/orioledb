@@ -82,7 +82,6 @@ struct BTreeSeqScan
 
 	bool		initialized;
 	bool		checkpointNumberSet;
-	bool 		parallelWorkersStarted;
 	CommitSeqNo snapshotCsn;
 	OBTreeFindPageContext context;
 	OFixedKey	prevHikey;
@@ -1017,8 +1016,13 @@ init_btree_seq_scan(BTreeSeqScan *scan)
 
 	o_btree_load_shmem(desc);
 
-	if (poscan && !scan->parallelWorkersStarted)
+	if (poscan)
 	{
+		/* Scan worker numbers are assigned by the order of workers init of local seqscan. In case of
+		 * call seqscan in an index build worker, the numbers of scan workers, and who is a scan leader
+		 * is not related to index build leader (who merges workers sort results after all workers completed
+		 * their scans).
+		 */
 		SpinLockAcquire(&poscan->workerStart);
 		for (scan->workerNumber = 0; poscan->worker_active[scan->workerNumber] == true; scan->workerNumber++)
 		{
@@ -1036,15 +1040,7 @@ init_btree_seq_scan(BTreeSeqScan *scan)
 		}
 		SpinLockRelease(&poscan->workerStart);
 
-		elog(DEBUG3, "make_btree_seq_scan_internal. %s %d started", poscan ? "Parallel worker" : "Worker", scan->workerNumber);
-	}
-	else if (poscan && scan->parallelWorkersStarted)
-	{
-		/* Parallel scan called for index build. Leader and workers already joined
-		 * and took their roles */
-		scan->isLeader = !(poscan->coordinate->isWorker);
-		Assert(poscan->nworkers == coordinate->nParticipants);
-		elog(DEBUG2, "make_btree_seq_scan_internal. %s %d started for index build", poscan ? "Parallel worker" : "Worker", scan->workerNumber);
+		elog(DEBUG3, "init_btree_seq_scan. %s %d started", poscan ? "Parallel worker" : "Worker", scan->workerNumber);
 	}
 	else
 	{
