@@ -80,7 +80,7 @@ class CheckpointSameTrxTest(BaseTest):
 						  (10, 11, 12, 13, 14, 15, '16', 17, 18, 19, 20, 21)],
 						 node.execute("""
 							SET LOCAL enable_seqscan = off;
-						 	SELECT * FROM o_test_1 ORDER BY val_1
+							SELECT * FROM o_test_1 ORDER BY val_1
 						 """))
 
 	def test_drop_index_checkpoint(self):
@@ -156,4 +156,103 @@ class CheckpointSameTrxTest(BaseTest):
 		""")
 		node.stop(['-m', 'immediate'])
 		node.start()
+		node.stop()
+
+	def test_add_column_checkpoint(self):
+		node = self.node
+		node.start()
+		node.safe_psql("""
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+			""")
+		node.safe_psql("""
+			CREATE TABLE o_test_1(
+				val_1 text,
+				UNIQUE (val_1)
+			)USING orioledb;
+
+			ALTER TABLE o_test_1 ADD COLUMN val_10 text;
+
+			CHECKPOINT;
+		""")
+
+		node.stop(['-m', 'immediate'])
+
+		node.start()
+
+	def test_drop_table_checkpoint_2(self):
+		node = self.node
+		node.start()
+		node.safe_psql("""
+
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+
+			CREATE TABLE o_test_1(
+				val_1 int PRIMARY KEY,
+				val_2 int
+			)USING orioledb;
+
+			CREATE TABLE o_test_2(
+				val_3 int,
+				val_4 int
+			)USING orioledb;
+
+			INSERT INTO o_test_1 VALUES (1, 2);
+
+			INSERT INTO o_test_2 VALUES (3, 4);
+
+			DROP TABLE o_test_2;
+
+			CHECKPOINT;
+
+		""")
+
+		node.stop(['-m', 'immediate'])
+
+		node.start()
+
+		node.stop()
+
+	def test_drop_column_checkpoint(self):
+		node = self.node
+		node.start()
+		node.safe_psql("""
+
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+
+			CREATE TABLE o_test_1(
+				val_1 int,
+				val_2 int,
+				val_3 int,
+				val_4 int
+			)USING orioledb;
+
+			CREATE UNIQUE INDEX ind_1
+				ON o_test_1 (val_1, val_2) INCLUDE(val_3, val_4);
+
+			ALTER TABLE o_test_1 DROP COLUMN val_3;
+
+			DROP TABLE o_test_1;
+
+			CREATE TABLE o_test_1(
+				val_1 int,
+				val_2 int,
+				val_3 int,
+				val_4 int,
+				UNIQUE(val_1, val_2) INCLUDE(val_3, val_4)
+			)USING orioledb;
+
+			ALTER TABLE o_test_1 DROP COLUMN val_3;
+
+			ALTER TABLE o_test_1 DROP COLUMN val_1;
+
+			DROP TABLE o_test_1;
+
+			CHECKPOINT;
+
+		""")
+
+		node.stop(['-m', 'immediate'])
+
+		node.start()
+
 		node.stop()
