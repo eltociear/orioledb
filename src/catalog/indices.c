@@ -140,7 +140,7 @@ typedef struct oIdxShared
 	bool		brokenhotchain;
 
 	/* Oriole-specific */
-	double         (*worker_heap_scan_fn) (OTableDescr, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
+	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
 	OTableDescr    *descr;
 	OIndexDescr    *idx;
 	/*
@@ -214,7 +214,7 @@ typedef struct oIdxBuildState
 	oIdxLeader   *btleader;
 
 	/* Oriole-specific */
-	double         (*worker_heap_scan_fn) (OTableDescr, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
+	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
 	OTableDescr    *descr;
 	OIndexDescr    *idx;
 } oIdxBuildState;
@@ -786,7 +786,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 */
 	EnterParallelMode();
 	Assert(request > 0);
-	pcxt = CreateParallelContext("postgres", "_o_index_parallel_build_main",
+	pcxt = CreateParallelContext("orioledb", "_o_index_parallel_build_main",
 								 request);
 
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
@@ -1192,6 +1192,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	coordinate->nParticipants = -1;
 	coordinate->sharedsort = sharedsort;
 
+	/* Begin "partial" tuplesort */
+	btspool->sortstate = tuplesort_begin_orioledb_index(btshared->idx, work_mem, false, coordinate);
 
 	/* Fill in buildstate for _o_index_build_callback() */
 	buildstate.isunique = btshared->isunique;
@@ -1208,8 +1210,15 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	 * Call build_secondary_index_worker_heap_scan() or
 	 * rebuild_index_worker_heap_scan();
 	 */
-	reltuples = btshared->worker_heap_scan_fn(*btshared->descr, btshared->idx,
+	reltuples = btshared->worker_heap_scan_fn(btshared->descr, btshared->idx,
 												poscan, coordinate, &buildstate, progress);
+
+	/* Execute this worker's part of the sort */
+	if (progress)
+		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
+									 PROGRESS_BTREE_PHASE_PERFORMSORT_1);
+	tuplesort_performsort(btspool->sortstate);
+
 	/*
 	 * Done.  Record ambuild statistics, and whether we encountered a broken
 	 * HOT chain.
@@ -1265,9 +1274,6 @@ build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, Par
 				index_tuples;
 	Tuplesortstate  *sortstate = ((oIdxBuildState *) buildstate)->spool->sortstate;
 
-	/* Begin "partial" tuplesort */
-	sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
-
 	sscan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, COMMITSEQNO_INPROGRESS, poscan);
 	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
 
@@ -1298,81 +1304,78 @@ build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, Par
 	ExecDropSingleTupleTableSlot(primarySlot);
 	free_btree_seq_scan(sscan);
 
-	/* Execute this worker's part of the sort */
-	if (progress)
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
-									 PROGRESS_BTREE_PHASE_PERFORMSORT_1);
-	tuplesort_performsort(sortstate);
-
 	return index_tuples;
 }
 
 void
 build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 {
-	void		*sscan;
-	OIndexDescr *idx;
 	Tuplesortstate *sortstate;
-	TupleTableSlot *primarySlot;
 	Relation	tableRelation,
 				indexRelation = NULL;
 	CheckpointFileHeader fileHeader;
 	/* Infrastructure for parallel build corresponds to _bt_spools_heapscan */
 	oIdxSpool    	*btspool;
-	oIdxBuildState  *buildstate;
+	oIdxBuildState  buildstate;
 	SortCoordinate coordinate = NULL;
 	uint64		ctid;
 	double 		heap_tuples,
 				index_tuples;
 	bool 		BrokenHotChain;
 	int 		nParallelWorkers = 3;
+	OIndexDescr *idx;
 
 	ctid = 1;
 	idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
+
+	buildstate.idx = idx;
+	buildstate.descr = descr;
+	buildstate.spool = NULL;
+	buildstate.indtuples = 0;
+	buildstate.btleader = NULL;
+	buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
+	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
 
 	/* Attempt to launch parallel worker scan when required */
 	if (nParallelWorkers > 0)
 	{
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-		btspool->heap = table_open(o_table->oids.reloid, AccessShareLock);
+		btspool->heap = buildstate.heap;
+		buildstate.spool = btspool;
+
 //		btspool->index = index_open(o_table->indices[ix_num].oids.reloid,
 //								   AccessShareLock); // Can we avoid opening index so early?
 
-		buildstate = (oIdxBuildState *) palloc0(sizeof(buildstate));
 		/* save data needed for workers */
-		buildstate->worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
-		buildstate->idx = idx;
-		buildstate->descr = descr;
-		buildstate->spool = btspool;
 		// In btree build state comes from caller. What other buildstate.base things should be set?
 
-		_o_index_begin_parallel(buildstate, false, nParallelWorkers);
+		_o_index_begin_parallel(&buildstate, false, nParallelWorkers);
 	}
 
 	/*
 	 * If parallel build requested and at least one worker process was
 	 * successfully launched, set up coordination state
 	 */
-	if (buildstate->btleader)
+	if (buildstate.btleader)
 	{
 		coordinate = (SortCoordinate) palloc0(sizeof(SortCoordinateData));
 		coordinate->isWorker = false;
 		coordinate->nParticipants =
-			buildstate->btleader->nparticipanttuplesorts;
-		coordinate->sharedsort = buildstate->btleader->sharedsort;
+			buildstate.btleader->nparticipanttuplesorts;
+		coordinate->sharedsort = buildstate.btleader->sharedsort;
 	}
 
 	/* Begin serial/leader tuplesort. */
 	sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
 
 	/* Fill spool using either serial or parallel heap scan */
-	if (!buildstate->btleader)
+	if (!buildstate.btleader)
 		/* Serial build */
-		index_tuples = build_secondary_index_worker_heap_scan(descr, idx, NULL, NULL, buildstate, false);
+		index_tuples = build_secondary_index_worker_heap_scan(descr, idx, NULL, NULL, &buildstate, false);
 	else
 	{
 		/* We are on leader. Wait until workers end their scans */
-		index_tuples = _o_index_parallel_heapscan(buildstate, &BrokenHotChain);
+		index_tuples = _o_index_parallel_heapscan(&buildstate, &BrokenHotChain);
 	}
 
 	heap_tuples = index_tuples;
