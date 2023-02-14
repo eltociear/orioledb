@@ -81,6 +81,7 @@ typedef struct oIdxSpool
 	Relation	heap;
 	Relation	index;
 	bool		isunique;
+
 } oIdxSpool;
 
 /*
@@ -141,8 +142,10 @@ typedef struct oIdxShared
 
 	/* Oriole-specific */
 	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
-	OTableDescr    *descr;
-	OIndexDescr    *idx;
+	OTableDescr    descr;
+	OIndexDescr    idx;
+	BTreeDescr	   primary_desc;
+	TupleDescData 	tupdesc;
 	/*
 	 * ParallelTableScanDescData data follows. Can't directly embed here, as
 	 * implementations of the parallel table scan desc interface might need
@@ -217,6 +220,8 @@ typedef struct oIdxBuildState
 	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, SortCoordinate, void *, bool);
 	OTableDescr    *descr;
 	OIndexDescr    *idx;
+	BTreeDescr     *primary_desc;
+	TupleDescData   *tupdesc;
 } oIdxBuildState;
 
 static void _o_index_end_parallel(oIdxLeader *btleader);
@@ -871,8 +876,10 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->brokenhotchain = false;
 
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
-	btshared->descr = buildstate->descr;
-	btshared->idx = buildstate->idx;
+	btshared->descr = *(buildstate->descr);
+	btshared->idx = *(buildstate->idx);
+	btshared->primary_desc = *(buildstate->primary_desc);
+	TupleDescCopy(&btshared->tupdesc, buildstate->tupdesc);
 
 	/* Call orioledb_parallelscan_initialize via tableam handler */
 	table_parallelscan_initialize(btspool->heap,
@@ -1193,7 +1200,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	coordinate->sharedsort = sharedsort;
 
 	/* Begin "partial" tuplesort */
-	btspool->sortstate = tuplesort_begin_orioledb_index(btshared->idx, work_mem, false, coordinate);
+	btspool->sortstate = tuplesort_begin_orioledb_index(&btshared->idx, work_mem, false, coordinate);
 
 	/* Fill in buildstate for _o_index_build_callback() */
 	buildstate.isunique = btshared->isunique;
@@ -1202,7 +1209,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	buildstate.spool = btspool;
 	buildstate.indtuples = 0;
 	buildstate.btleader = NULL;
-
+	buildstate.primary_desc = &(btshared->primary_desc);
+	buildstate.tupdesc = &(btshared->tupdesc);
 	/* Join parallel scan */
 ////	indexInfo = BuildIndexInfo(btspool->index);
 ////	indexInfo->ii_Concurrent = btshared->isconcurrent;
@@ -1210,7 +1218,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	 * Call build_secondary_index_worker_heap_scan() or
 	 * rebuild_index_worker_heap_scan();
 	 */
-	reltuples = btshared->worker_heap_scan_fn(btshared->descr, btshared->idx,
+	reltuples = btshared->worker_heap_scan_fn(&btshared->descr, &btshared->idx,
 												poscan, coordinate, &buildstate, progress);
 
 	/* Execute this worker's part of the sort */
@@ -1274,8 +1282,8 @@ build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, Par
 				index_tuples;
 	Tuplesortstate  *sortstate = ((oIdxBuildState *) buildstate)->spool->sortstate;
 
-	sscan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, COMMITSEQNO_INPROGRESS, poscan);
-	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
+	sscan = make_btree_seq_scan(((oIdxBuildState *) buildstate)->primary_desc, COMMITSEQNO_INPROGRESS, poscan);
+	primarySlot = MakeSingleTupleTableSlot(((oIdxBuildState *) buildstate)->tupdesc, &TTSOpsOrioleDB);
 
 	heap_tuples = 0;
 	index_tuples = 0;
@@ -1335,7 +1343,8 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	buildstate.btleader = NULL;
 	buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
 	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
-
+	buildstate.primary_desc = &GET_PRIMARY(descr)->desc;
+	buildstate.tupdesc = descr->tupdesc;
 	/* Attempt to launch parallel worker scan when required */
 	if (nParallelWorkers > 0)
 	{
