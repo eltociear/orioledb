@@ -145,12 +145,8 @@ typedef struct oIdxShared
 	OTableDescr    descr;
 	OIndexDescr    idx;
 	BTreeDescr	   primary_desc;
-	TupleDescData 	tupdesc;
-	/*
-	 * ParallelTableScanDescData data follows. Can't directly embed here, as
-	 * implementations of the parallel table scan desc interface might need
-	 * stronger alignment.
-	 */
+	ParallelOScanDescData poscan;
+	TupleDescData 	tupdesc; /* Should be last. Contains flexible array! */
 } oIdxShared;
 
 /*
@@ -883,7 +879,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 
 	/* Call orioledb_parallelscan_initialize via tableam handler */
 	table_parallelscan_initialize(btspool->heap,
-								  ParallelTableScanFromoIdxShared(btshared),
+								  &btshared->poscan,
 								  snapshot);
 
 	/*
@@ -1191,7 +1187,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	oIdxBuildState buildstate;
 	double		reltuples;
 	IndexInfo  *indexInfo;
-	ParallelOScanDesc poscan = (ParallelOScanDesc) ParallelTableScanFromoIdxShared(btshared);
+	ParallelOScanDesc poscan = &btshared->poscan;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0(sizeof(SortCoordinateData));
