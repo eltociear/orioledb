@@ -1874,7 +1874,8 @@ replay_container(Pointer startPtr, Pointer endPtr,
 			ptr += sizeof(Oid);
 			memcpy(&oids.relnode, ptr, sizeof(Oid));
 			ptr += sizeof(Oid);
-			recreate_table_descr_by_oids(oids);
+			if (reachedConsistency)
+				recreate_table_descr_by_oids(oids);
 
 			if (sys_tree_num == SYS_TREES_O_TABLES && reachedConsistency)
 			{
