@@ -219,7 +219,7 @@ typedef struct oIdxBuildState
 	BTreeDescr     *primary_desc;
 	TupleDescData   *tupdesc;
 } oIdxBuildState;
-
+static void _o_index_spooldestroy(oIdxSpool *btspool);
 static void _o_index_end_parallel(oIdxLeader *btleader);
 static Size _o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
@@ -1244,6 +1244,16 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	tuplesort_end(btspool->sortstate);
 }
 
+/*
+ * clean up a spool structure and its substructures.
+ */
+static void
+_o_index_spooldestroy(oIdxSpool *btspool)
+{
+//	tuplesort_end(btspool->sortstate);
+	pfree(btspool);
+}
+
 static inline
 bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
 							   TupleTableSlot *slot, double *ntuples)
@@ -1351,9 +1361,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 //		btspool->index = index_open(o_table->indices[ix_num].oids.reloid,
 //								   AccessShareLock); // Can we avoid opening index so early?
 
-		/* save data needed for workers */
-		// In btree build state comes from caller. What other buildstate.base things should be set?
-
 		_o_index_begin_parallel(&buildstate, false, nParallelWorkers);
 	}
 
@@ -1389,7 +1396,16 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 
 	btree_write_index_data(&idx->desc, idx->leafTupdesc, sortstate,
 						   ctid, &fileHeader);
+
+	if (buildstate.btleader)
+	{
+		_o_index_spooldestroy(buildstate.spool);
+		_o_index_end_parallel(buildstate.btleader);
+	}
+
+	/* End serial/leader sort */
 	tuplesort_end_orioledb_index(sortstate);
+	table_close(buildstate.heap, AccessShareLock);
 
 	/*
 	 * We hold oTablesAddLock till o_tables_update().  So, checkpoint number
