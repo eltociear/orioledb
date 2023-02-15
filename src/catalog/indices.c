@@ -146,7 +146,10 @@ typedef struct oIdxShared
 	OIndexDescr    idx;
 	BTreeDescr	   primary_desc;
 	ParallelOScanDescData poscan;
-	TupleDescData 	tupdesc; /* Should be last. Contains flexible array! */
+	TupleDescData 	tupdesc; /* Contains flexible array! */
+	/* leafTupdesc follows. Accessible through LeafTupleDescFromoIdxShared() only */
+	/* nonLeafTupdesc follows. Accessible through nonLeafTupleDescFromoIdxShared() only */
+
 } oIdxShared;
 
 /*
@@ -158,6 +161,12 @@ typedef struct oIdxShared
 #define ParallelTableScanFromoIdxShared(shared) \
 	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(oIdxShared)))
 
+ #define LeafTupleDescFromoIdxShared(shared) \
+	 (TupleDesc) ((char*) (shared) + offsetof(oIdxShared, tupdesc) + TupleDescSize(&((shared)->tupdesc)))
+
+ #define nonLeafTupleDescFromoIdxShared(shared) \
+	 (TupleDesc) ((char*) LeafTupleDescFromoIdxShared((shared)) + TupleDescSize(LeafTupleDescFromoIdxShared((shared))))
+
 /*
  * Status for leader in parallel index build.
  */
@@ -168,7 +177,7 @@ typedef struct oIdxLeader
 
 	/*
 	 * nparticipanttuplesorts is the exact number of worker processes
-	 * successfully launched, plus one leader process if it participates as a
+     * successfully launched, plus one leader process if it participates as a
 	 * worker (only DISABLE_LEADER_PARTICIPATION builds avoid leader
 	 * participating as a worker).
 	 */
@@ -218,6 +227,8 @@ typedef struct oIdxBuildState
 	OIndexDescr    *idx;
 	BTreeDescr     *primary_desc;
 	TupleDescData   *tupdesc;
+	TupleDescData   *leafTupdesc;
+	TupleDescData   *nonLeafTupdesc;
 } oIdxBuildState;
 static void _o_index_spooldestroy(oIdxSpool *btspool);
 static void _o_index_end_parallel(oIdxLeader *btleader);
@@ -876,7 +887,8 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->idx = *(buildstate->idx);
 	btshared->primary_desc = *(buildstate->primary_desc);
 	TupleDescCopy(&btshared->tupdesc, buildstate->tupdesc);
-
+	TupleDescCopy(LeafTupleDescFromoIdxShared(btshared), buildstate->leafTupdesc);
+	TupleDescCopy(nonLeafTupleDescFromoIdxShared(btshared), buildstate->nonLeafTupdesc);
 	/* Call orioledb_parallelscan_initialize via tableam handler */
 	table_parallelscan_initialize(btspool->heap,
 								  &btshared->poscan,
@@ -981,9 +993,12 @@ _o_index_end_parallel(oIdxLeader *btleader)
 static Size
 _o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot)
 {
+	Size size = add_size(BUFFERALIGN(sizeof(oIdxShared)),
+			offsetof(struct TupleDescData, attrs) + INDEX_MAX_KEYS * sizeof(FormData_pg_attribute));
+
+	size = add_size(size, table_parallelscan_estimate(heap, snapshot));
 	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
-	return add_size(BUFFERALIGN(sizeof(oIdxShared)),
-					table_parallelscan_estimate(heap, snapshot));
+	return size;
 }
 
 /* Private copy just because _bt_parallel_heap_scan is static */
@@ -1207,6 +1222,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	buildstate.btleader = NULL;
 	buildstate.primary_desc = &(btshared->primary_desc);
 	buildstate.tupdesc = &(btshared->tupdesc);
+	buildstate.leafTupdesc = LeafTupleDescFromoIdxShared(btshared);
+	buildstate.nonLeafTupdesc = nonLeafTupleDescFromoIdxShared(btshared);
 	/* Join parallel scan */
 ////	indexInfo = BuildIndexInfo(btspool->index);
 ////	indexInfo->ii_Concurrent = btshared->isconcurrent;
@@ -1288,6 +1305,11 @@ build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, Par
 				index_tuples;
 	Tuplesortstate  *sortstate = ((oIdxBuildState *) buildstate)->spool->sortstate;
 
+	idx->nonLeafTupdesc = ((oIdxBuildState *) buildstate)->nonLeafTupdesc;
+	idx->leafTupdesc = ((oIdxBuildState *) buildstate)->leafTupdesc;
+	descr->tupdesc = ((oIdxBuildState *) buildstate)->tupdesc;
+
+	Assert(false);
 	sscan = make_btree_seq_scan(((oIdxBuildState *) buildstate)->primary_desc, COMMITSEQNO_INPROGRESS, poscan);
 	primarySlot = MakeSingleTupleTableSlot(((oIdxBuildState *) buildstate)->tupdesc, &TTSOpsOrioleDB);
 
@@ -1351,6 +1373,9 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
 	buildstate.primary_desc = &GET_PRIMARY(descr)->desc;
 	buildstate.tupdesc = descr->tupdesc;
+	buildstate.leafTupdesc = idx->leafTupdesc;
+	buildstate.nonLeafTupdesc = idx->nonLeafTupdesc;
+
 	/* Attempt to launch parallel worker scan when required */
 	if (nParallelWorkers > 0)
 	{
