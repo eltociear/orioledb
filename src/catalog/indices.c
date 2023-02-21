@@ -78,7 +78,7 @@
 typedef struct oIdxSpool
 {
 	Tuplesortstate *sortstate;	/* state data for tuplesort.c */
-	Relation	heap;
+//	Relation	heap;
 	Relation	index;
 	bool		isunique;
 
@@ -96,7 +96,7 @@ typedef struct oIdxShared
 	 * for the benefit of worker processes that need to create oIdxSpool state
 	 * corresponding to that used by the leader.
 	 */
-	Oid			heaprelid;
+//	Oid			heaprelid;
 	Oid			indexrelid;
 	bool		isunique;
 	bool		isconcurrent;
@@ -217,7 +217,7 @@ typedef struct oIdxBuildState
 	OTable 		*o_table;
 } oIdxBuildState;
 static void _o_index_end_parallel(oIdxLeader *btleader);
-static Size _o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot, Size o_table_size);
+static Size _o_index_parallel_estimate_shared(Size o_table_size);
 static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
 static void _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared,
 											Sharedsort *sharedsort, int sortmem,
@@ -810,7 +810,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 * PARALLEL_KEY_TUPLESORT tuplesort workspace
 	 */
 	/* Calls orioledb_parallelscan_estimate via tableam handler */
-	estbtshared = _o_index_parallel_estimate_shared(btspool->heap, snapshot, o_table_size);
+	estbtshared = _o_index_parallel_estimate_shared(o_table_size);
 	shm_toc_estimate_chunk(&pcxt->estimator, estbtshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -876,10 +876,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->ix_num = buildstate->ix_num;
 	btshared->o_table_size = o_table_size;
 	memcpy(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
-	/* Call orioledb_parallelscan_initialize via tableam handler */
-	table_parallelscan_initialize(btspool->heap,
-								  (ParallelTableScanDesc) &(btshared->poscan),
-								  snapshot);
+	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -978,11 +975,11 @@ _o_index_end_parallel(oIdxLeader *btleader)
  * btree index build based on the snapshot its parallel scan will use.
  */
 static Size
-_o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot, Size o_table_size)
+_o_index_parallel_estimate_shared(Size o_table_size)
 {
 	Size size = add_size(BUFFERALIGN(sizeof(oIdxShared)), o_table_size);
 
-	size = add_size(size, table_parallelscan_estimate(heap, snapshot));
+	size = add_size(size, sizeof(ParallelOScanDescData));
 	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
 	return size;
 }
@@ -1045,7 +1042,7 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 
 	/* Allocate memory and initialize private spool */
 	leaderworker = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-	leaderworker->heap = buildstate->spool->heap;
+//	leaderworker->heap = buildstate->spool->heap;
 	leaderworker->index = buildstate->spool->index;
 	leaderworker->isunique = buildstate->spool->isunique;
 
@@ -1199,7 +1196,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	/* Fill in worker buildstate */
 	buildstate.isunique = btshared->isunique;
 	buildstate.havedead = false;
-	buildstate.heap = btspool->heap;
+//	buildstate.heap = btspool->heap;
 	buildstate.spool = btspool;
 	buildstate.indtuples = 0;
 	buildstate.btleader = NULL;
@@ -1332,7 +1329,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	buildstate.indtuples = 0;
 	buildstate.btleader = NULL;
 	buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
-	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
+//	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
 
 	buildstate.ix_num = ix_num;
 	buildstate.o_table = o_table;
@@ -1341,7 +1338,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	if (nParallelWorkers > 0)
 	{
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-		btspool->heap = buildstate.heap;
+//		btspool->heap = buildstate.heap;
 		buildstate.spool = btspool;
 
 //		btspool->index = index_open(o_table->indices[ix_num].oids.reloid,
@@ -1391,7 +1388,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 
 	/* End serial/leader sort */
 	tuplesort_end_orioledb_index(sortstate);
-	table_close(buildstate.heap, AccessShareLock);
+//	table_close(buildstate.heap, AccessShareLock);
 
 	/*
 	 * We hold oTablesAddLock till o_tables_update().  So, checkpoint number

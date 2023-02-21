@@ -1132,6 +1132,14 @@ orioledb_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 
 	poscan->phs_base.phs_relid = RelationGetRelid(rel);
 	poscan->phs_base.phs_syncscan = false;
+	return orioledb_parallelscan_initialize_inner(pscan);
+}
+
+Size
+orioledb_parallelscan_initialize_inner(ParallelTableScanDesc pscan)
+{
+	ParallelOScanDesc poscan = (ParallelOScanDesc) pscan;
+
 	SpinLockInit(&poscan->intpageAccess);
 	SpinLockInit(&poscan->workerStart);
 	SpinLockInit(&poscan->workerBeginDisk);
