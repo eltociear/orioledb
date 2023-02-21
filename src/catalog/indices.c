@@ -222,7 +222,6 @@ typedef struct oIdxBuildState
 	OIndexNumber   ix_num;
 	OTable 		*o_table;
 } oIdxBuildState;
-static void _o_index_spooldestroy(oIdxSpool *btspool);
 static void _o_index_end_parallel(oIdxLeader *btleader);
 static Size _o_index_parallel_estimate_shared(Relation heap, Snapshot snapshot, Size o_table_size);
 static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
@@ -883,20 +882,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->ix_num = buildstate->ix_num;
 	btshared->o_table_size = o_table_size;
 	memcpy(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
-//	btshared->descr = buildstate->descr;
-//	btshared->idx = buildstate->idx;
-//	btshared->primary_desc = buildstate->primary_desc;
-//	btshared->idx_desc = buildstate->idx_desc;
-//	btshared->primary_arg = buildstate->primary_arg;
-//	TupleDescCopy(&btshared->tupdesc, buildstate->tupdesc);
-//	TupleDescCopy(LeafTupleDescFromoIdxShared(btshared), buildstate->leafTupdesc);
-//	TupleDescCopy(nonLeafTupleDescFromoIdxShared(btshared), buildstate->nonLeafTupdesc);
-//	btshared->descr.tupdesc = &btshared->tupdesc;
-//	btshared->idx.nonLeafTupdesc = nonLeafTupleDescFromoIdxShared(btshared);
-//	btshared->idx.leafTupdesc = LeafTupleDescFromoIdxShared(btshared);
 	/* Call orioledb_parallelscan_initialize via tableam handler */
 	table_parallelscan_initialize(btspool->heap,
-								  &btshared->poscan,
+								  (ParallelTableScanDesc) &(btshared->poscan),
 								  snapshot);
 
 	/*
@@ -1101,8 +1089,6 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	oIdxSpool    *btspool;
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
-////	Relation	heapRel;
-////	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
 	WalUsage   *walusage;
@@ -1143,14 +1129,8 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		indexLockmode = RowExclusiveLock;
 	}
 
-	/* Open relations within worker */
-////	heapRel = table_open(btshared->heaprelid, heapLockmode);
-////	indexRel = index_open(btshared->indexrelid, indexLockmode);
-
 	/* Initialize worker's own spool */
 	btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-////	btspool->heap = heapRel;
-////	btspool->index = indexRel;
 	btspool->isunique = btshared->isunique;
 
 	/* Look up shared state private to tuplesort.c */
@@ -1178,9 +1158,6 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		ResetUsage();
 	}
 #endif							/* BTREE_BUILD_STATS */
-
-////	index_close(indexRel, indexLockmode);
-////	table_close(heapRel, heapLockmode);
 }
 
 /*
@@ -1205,7 +1182,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	SortCoordinate coordinate;
 	oIdxBuildState buildstate;
 	double		reltuples;
-	IndexInfo  *indexInfo;
+//	IndexInfo  *indexInfo;
 	ParallelOScanDesc poscan = &btshared->poscan;
 	OTable 		*o_table;
 	OTableDescr descr;
@@ -1218,7 +1195,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	coordinate->sharedsort = sharedsort;
 
  	buildstate.ix_num = btshared->ix_num;
-	o_table = deserialize_o_table(&btshared->o_table_serialized, btshared->o_table_size);
+	o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
 	o_fill_tmp_table_descr(&descr, o_table);
 	idx = descr.indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
 
@@ -1232,19 +1209,6 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	buildstate.spool = btspool;
 	buildstate.indtuples = 0;
 	buildstate.btleader = NULL;
-/////	buildstate.primary_desc = btshared->primary_desc;
-/////	buildstate.primary_arg = btshared->primary_arg;
-////	buildstate.primary_desc.arg = &(buildstate.primary_arg);
-	//	buildstate.tupdesc = &(btshared->tupdesc);
-//	buildstate.leafTupdesc = LeafTupleDescFromoIdxShared(btshared);
-//	buildstate.nonLeafTupdesc = nonLeafTupleDescFromoIdxShared(btshared);
-/////	buildstate.descr = btshared->descr;
-/////	buildstate.descr.tupdesc = &(btshared->tupdesc);
-/////	buildstate.idx = btshared->idx;
-/////	buildstate.idx.leafTupdesc = LeafTupleDescFromoIdxShared(btshared);
-/////	buildstate.idx.nonLeafTupdesc = nonLeafTupleDescFromoIdxShared(btshared);
-/////	buildstate.idx.desc = btshared->idx_desc;
-//	buildstate.idx.desc.arg = btshared->arg;
 	/* Join parallel scan */
 ////	indexInfo = BuildIndexInfo(btspool->index);
 ////	indexInfo->ii_Concurrent = btshared->isconcurrent;
@@ -1285,16 +1249,6 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	tuplesort_end(btspool->sortstate);
 }
 
-/*
- * clean up a spool structure and its substructures.
- */
-static void
-_o_index_spooldestroy(oIdxSpool *btspool)
-{
-//	tuplesort_end(btspool->sortstate);
-	pfree(btspool);
-}
-
 static inline
 bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
 							   TupleTableSlot *slot, double *ntuples)
@@ -1329,7 +1283,6 @@ build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, Par
 				index_tuples;
 	Tuplesortstate  *sortstate = ((oIdxBuildState *) buildstate)->spool->sortstate;
 
-//	Assert(false);
 	sscan = make_btree_seq_scan(&(GET_PRIMARY(descr)->desc), COMMITSEQNO_INPROGRESS, poscan);
 	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
 
@@ -1441,7 +1394,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 
 	if (buildstate.btleader)
 	{
-		_o_index_spooldestroy(buildstate.spool);
+		pfree(buildstate.spool);
 		_o_index_end_parallel(buildstate.btleader);
 	}
 
@@ -1502,14 +1455,6 @@ _o_index_build_callback(ItemPointer tid,
 
 	buildstate->indtuples += 1;
 }
-
-
-
-/* TODO */
-//rebuild_index_worker_heap_scan()
-//{
-//
-//}
 
 void
 rebuild_indices(OTable *old_o_table, OTableDescr *old_descr,
