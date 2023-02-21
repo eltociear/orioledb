@@ -1202,7 +1202,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	/* Begin "partial" tuplesort */
 	btspool->sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
 
-	/* Fill in buildstate for _o_index_build_callback() */
+	/* Fill in worker buildstate */
 	buildstate.isunique = btshared->isunique;
 	buildstate.havedead = false;
 	buildstate.heap = btspool->heap;
@@ -1428,32 +1428,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 		table_close(tableRelation, AccessExclusiveLock);
 		index_close(indexRelation, AccessExclusiveLock);
 	}
-}
-
-/*
- * Per-tuple callback for build_secondary_index_worker_heap_scan/rebuild_index_worker_heap_scan
- */
-static void
-_o_index_build_callback(ItemPointer tid,
-				   		Datum *values,
-				   		bool *isnull,
-				   		bool tupleIsAlive,
-				   		void *state)
-{
-	oIdxBuildState *buildstate = (oIdxBuildState *) state;
-
-	/*
-	 * insert the index tuple into the appropriate spool file for subsequent
-	 * processing
-	 */
-	if (tupleIsAlive)
-		tuplesort_putindextuplevalues(buildstate->spool->sortstate, buildstate->spool->index,
-								  tid, values, isnull);
-	else
-		/* May be not needed */
-		buildstate->havedead = true;
-
-	buildstate->indtuples += 1;
 }
 
 void
