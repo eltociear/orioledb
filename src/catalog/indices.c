@@ -1020,6 +1020,7 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 	_o_index_parallel_scan_and_sort(leaderworker, btleader->btshared, btleader->sharedsort,
 							   sortmem, true);
 
+	pfree(leaderworker);
 #ifdef BTREE_BUILD_STATS
 	if (log_btree_build_stats)
 	{
@@ -1090,6 +1091,7 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	o_free_tmp_table_descr(btspool->descr);
 	pfree(btspool->descr);
+	pfree(btspool);
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
@@ -1170,7 +1172,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	ConditionVariableSignal(&btshared->workersdonecv);
 
 	/* We can end tuplesorts immediately */
-	tuplesort_end(btspool->sortstate);
+	tuplesort_end_orioledb_index(btspool->sortstate);
 }
 
 static inline
@@ -1308,14 +1310,14 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	btree_write_index_data(&idx->desc, idx->leafTupdesc, sortstate,
 						   ctid, &fileHeader);
 
-	if (buildstate.btleader)
-	{
-		pfree(buildstate.spool);
-		_o_index_end_parallel(buildstate.btleader);
-	}
-
 	/* End serial/leader sort */
 	tuplesort_end_orioledb_index(sortstate);
+
+	if (buildstate.btleader)
+	{
+		pfree(btspool);
+		_o_index_end_parallel(buildstate.btleader);
+	}
 
 	/*
 	 * We hold oTablesAddLock till o_tables_update().  So, checkpoint number
