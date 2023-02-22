@@ -976,8 +976,6 @@ _o_index_parallel_heapscan(oIdxBuildState *buildstate)
 		SpinLockAcquire(&btshared->mutex);
 		if (btshared->nparticipantsdone == nparticipanttuplesorts)
 		{
-			buildstate->indtuples = btshared->indtuples;
-			buildstate->reltuples = btshared->reltuples;
 			SpinLockRelease(&btshared->mutex);
 			break;
 		}
@@ -1301,8 +1299,8 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	{
 		/* We are on leader. Wait until workers end their scans */
 		_o_index_parallel_heapscan(&buildstate);
-		index_tuples = buildstate.indtuples;
-		heap_tuples = buildstate.reltuples;
+		index_tuples = buildstate.btleader->btshared->indtuples;
+		heap_tuples = buildstate.btleader->btshared->reltuples;
 	}
 
 	tuplesort_performsort(sortstate);
