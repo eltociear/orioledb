@@ -80,7 +80,7 @@ typedef struct oIdxSpool
 	Tuplesortstate *sortstate;	/* state data for tuplesort.c */
 	Relation	index;
 	OTable 	 	*o_table;
-	OTableDescr descr;
+	OTableDescr *descr;
 	bool		isunique;
 
 } oIdxSpool;
@@ -205,8 +205,6 @@ typedef struct oIdxBuildState
 	/* Oriole-specific */
 	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate *, bool, double *);
 	OIndexNumber   	ix_num;
-	OTable 		   *o_table;
-	OTableDescr    *descr;
 } oIdxBuildState;
 static void _o_index_end_parallel(oIdxLeader *btleader);
 static Size _o_index_parallel_estimate_shared(Size o_table_size);
@@ -780,7 +778,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 								 request);
 
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
-	o_table_serialized = serialize_o_table(buildstate->o_table, &o_table_size);
+	o_table_serialized = serialize_o_table(btspool->o_table, &o_table_size);
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
@@ -1009,8 +1007,8 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 	leaderworker = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 	leaderworker->index = buildstate->spool->index;
 	leaderworker->isunique = buildstate->spool->isunique;
-	leaderworker->o_table = buildstate->o_table;
-	leaderworker->descr = *buildstate->descr;
+	leaderworker->o_table = buildstate->spool->o_table;
+	leaderworker->descr = buildstate->spool->descr;
 	/*
 	 * Might as well use reliable figure when doling out maintenance_work_mem
 	 * (when requested number of workers were not launched, this will be
@@ -1075,7 +1073,8 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 	btspool->isunique = btshared->isunique;
 	btspool->o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
-	o_fill_tmp_table_descr(&(btspool->descr), btspool->o_table);
+	btspool->descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
+	o_fill_tmp_table_descr(btspool->descr, btspool->o_table);
 
 	/* Look up shared state private to tuplesort.c */
 	sharedsort = shm_toc_lookup(toc, PARALLEL_KEY_TUPLESORT, false);
@@ -1089,7 +1088,8 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	_o_index_parallel_scan_and_sort(btspool, btshared, sharedsort,
 							   sortmem, false);
 
-	o_free_tmp_table_descr(&(btspool->descr));
+	o_free_tmp_table_descr(btspool->descr);
+	pfree(btspool->descr);
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
@@ -1139,7 +1139,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	coordinate->sharedsort = sharedsort;
 
 	o_table = btspool->o_table;
-	idx = btspool->descr.indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
+	idx = btspool->descr->indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
 
 	/* Begin "partial" tuplesort */
 	btspool->sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
@@ -1148,7 +1148,7 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	 * Call build_secondary_index_worker_heap_scan() or
 	 * rebuild_index_worker_heap_scan();
 	 */
-	indtuples = btshared->worker_heap_scan_fn(&(btspool->descr), idx, poscan, btspool->sortstate, progress, &heaptuples);
+	indtuples = btshared->worker_heap_scan_fn(btspool->descr, idx, poscan, btspool->sortstate, progress, &heaptuples);
 
 	/* Execute this worker's part of the sort */
 	if (progress)
@@ -1264,12 +1264,12 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	if (nParallelWorkers > 0)
 	{
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
+		btspool->o_table = o_table;
+		btspool->descr = descr;
 
 		buildstate.indtuples = 0;
 		buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
 		buildstate.ix_num = ix_num;
-		buildstate.o_table = o_table;
-		buildstate.descr = descr;
 		buildstate.spool = btspool;
 
 		_o_index_begin_parallel(&buildstate, false, nParallelWorkers);
