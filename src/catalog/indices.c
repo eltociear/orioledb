@@ -185,7 +185,7 @@ typedef struct oIdxLeader
 	 */
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
-	Snapshot	snapshot;
+//	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } oIdxLeader;
@@ -761,7 +761,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
-	Snapshot	snapshot;
+//	Snapshot	snapshot;
 	Size		estbtshared;
 	Size		estsort;
 	oIdxShared   *btshared;
@@ -797,10 +797,10 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 * concurrent build, we take a regular MVCC snapshot and index whatever's
 	 * live according to that.
 	 */
-	if (!isconcurrent)
-		snapshot = SnapshotAny;
-	else
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+//	if (!isconcurrent)
+//		snapshot = SnapshotAny;
+//	else
+//		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 
 	o_table_serialized = serialize_o_table(buildstate->o_table, &o_table_size);
@@ -848,8 +848,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
+//		if (IsMVCCSnapshot(snapshot))
+//			UnregisterSnapshot(snapshot);
+		pfree(o_table_serialized);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
 		return;
@@ -875,7 +876,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->ix_num = buildstate->ix_num;
 	btshared->o_table_size = o_table_size;
-	memcpy(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
+	memmove(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
 	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
 	/*
@@ -918,7 +919,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		btleader->nparticipanttuplesorts++;
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
-	btleader->snapshot = snapshot;
+//	btleader->snapshot = snapshot;
 	btleader->walusage = walusage;
 	btleader->bufferusage = bufferusage;
 
@@ -962,8 +963,8 @@ _o_index_end_parallel(oIdxLeader *btleader)
 		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(btleader->snapshot))
-		UnregisterSnapshot(btleader->snapshot);
+//	if (IsMVCCSnapshot(btleader->snapshot))
+//		UnregisterSnapshot(btleader->snapshot);
 	DestroyParallelContext(btleader->pcxt);
 	ExitParallelMode();
 }
