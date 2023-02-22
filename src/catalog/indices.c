@@ -78,7 +78,6 @@
 typedef struct oIdxSpool
 {
 	Tuplesortstate *sortstate;	/* state data for tuplesort.c */
-//	Relation	heap;
 	Relation	index;
 	bool		isunique;
 
@@ -96,8 +95,6 @@ typedef struct oIdxShared
 	 * for the benefit of worker processes that need to create oIdxSpool state
 	 * corresponding to that used by the leader.
 	 */
-//	Oid			heaprelid;
-	Oid			indexrelid;
 	bool		isunique;
 	bool		isconcurrent;
 	int			scantuplesortstates;
@@ -126,22 +123,14 @@ typedef struct oIdxShared
 	 *
 	 * reltuples is the total number of input heap tuples.
 	 *
-	 * havedead indicates if RECENTLY_DEAD tuples were encountered during
-	 * build.
-	 *
 	 * indtuples is the total number of tuples that made it into the index.
-	 *
-	 * brokenhotchain indicates if any worker detected a broken HOT chain
-	 * during build.
 	 */
 	int			nparticipantsdone;
 	double		reltuples;
-	bool		havedead;
 	double		indtuples;
-	bool		brokenhotchain;
 
 	/* Oriole-specific */
-	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate *, bool);
+	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate *, bool, double *);
 	ParallelOScanDescData poscan;
 	OIndexNumber   ix_num;
 	Size 		   o_table_size;
@@ -199,10 +188,10 @@ typedef struct oIdxLeader
 typedef struct oIdxBuildState
 {
 	bool		isunique;
-	bool		havedead;
 	Relation	heap;
 	oIdxSpool    *spool;
-	double		indtuples;
+	double		indtuples,
+				reltuples;
 
 	/*
 	 * btleader is only present when a parallel index build is performed, and
@@ -212,7 +201,7 @@ typedef struct oIdxBuildState
 	oIdxLeader   *btleader;
 
 	/* Oriole-specific */
-	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate *, bool);
+	double         (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate *, bool, double *);
 	OIndexNumber   ix_num;
 	OTable 		*o_table;
 } oIdxBuildState;
@@ -761,7 +750,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
-//	Snapshot	snapshot;
 	Size		estbtshared;
 	Size		estsort;
 	oIdxShared   *btshared;
@@ -789,20 +777,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 								 request);
 
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
-
-	/*
-	 * Prepare for scan of the base relation.  In a normal index build, we use
-	 * SnapshotAny because we must retrieve all tuples and do our own time
-	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
-	 */
-//	if (!isconcurrent)
-//		snapshot = SnapshotAny;
-//	else
-//		snapshot = RegisterSnapshot(GetTransactionSnapshot());
-
-
 	o_table_serialized = serialize_o_table(buildstate->o_table, &o_table_size);
 
 	/*
@@ -848,8 +822,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-//		if (IsMVCCSnapshot(snapshot))
-//			UnregisterSnapshot(snapshot);
 		pfree(o_table_serialized);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
@@ -859,8 +831,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* Store shared build state, for which we reserved space */
 	btshared = (oIdxShared *) shm_toc_allocate(pcxt->toc, estbtshared);
 	/* Initialize immutable state */
-////	btshared->heaprelid = RelationGetRelid(btspool->heap);
-////	btshared->indexrelid = RelationGetRelid(btspool->index);
 	btshared->isunique = btspool->isunique;
 	btshared->isconcurrent = isconcurrent;
 	btshared->scantuplesortstates = scantuplesortstates;
@@ -869,9 +839,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* Initialize mutable state */
 	btshared->nparticipantsdone = 0;
 	btshared->reltuples = 0.0;
-	btshared->havedead = false;
 	btshared->indtuples = 0.0;
-	btshared->brokenhotchain = false;
 
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->ix_num = buildstate->ix_num;
@@ -919,7 +887,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		btleader->nparticipanttuplesorts++;
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
-//	btleader->snapshot = snapshot;
 	btleader->walusage = walusage;
 	btleader->bufferusage = bufferusage;
 
@@ -962,9 +929,6 @@ _o_index_end_parallel(oIdxLeader *btleader)
 	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-//	if (IsMVCCSnapshot(btleader->snapshot))
-//		UnregisterSnapshot(btleader->snapshot);
 	DestroyParallelContext(btleader->pcxt);
 	ExitParallelMode();
 }
@@ -999,12 +963,11 @@ _o_index_parallel_estimate_shared(Size o_table_size)
  *
  * Returns the total number of heap tuples scanned.
  */
-static double
-_o_index_parallel_heapscan(oIdxBuildState *buildstate, bool *brokenhotchain)
+static void
+_o_index_parallel_heapscan(oIdxBuildState *buildstate)
 {
 	oIdxShared   *btshared = buildstate->btleader->btshared;
 	int			nparticipanttuplesorts;
-	double		reltuples;
 
 	nparticipanttuplesorts = buildstate->btleader->nparticipanttuplesorts;
 	for (;;)
@@ -1012,10 +975,8 @@ _o_index_parallel_heapscan(oIdxBuildState *buildstate, bool *brokenhotchain)
 		SpinLockAcquire(&btshared->mutex);
 		if (btshared->nparticipantsdone == nparticipanttuplesorts)
 		{
-			buildstate->havedead = btshared->havedead;
 			buildstate->indtuples = btshared->indtuples;
-			*brokenhotchain = btshared->brokenhotchain;
-			reltuples = btshared->reltuples;
+			buildstate->reltuples = btshared->reltuples;
 			SpinLockRelease(&btshared->mutex);
 			break;
 		}
@@ -1027,7 +988,7 @@ _o_index_parallel_heapscan(oIdxBuildState *buildstate, bool *brokenhotchain)
 
 	ConditionVariableCancelSleep();
 
-	return reltuples;
+	return;
 }
 
 /* Private copy of _bt_leader_participate_as_worker which is static in PG.
@@ -1043,7 +1004,6 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 
 	/* Allocate memory and initialize private spool */
 	leaderworker = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-//	leaderworker->heap = buildstate->spool->heap;
 	leaderworker->index = buildstate->spool->index;
 	leaderworker->isunique = buildstate->spool->isunique;
 
@@ -1081,8 +1041,6 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	oIdxSpool    *btspool;
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
-//	LOCKMODE	heapLockmode;
-//	LOCKMODE	indexLockmode;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -1108,18 +1066,6 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Look up nbtree shared state */
 	btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
-
-	/* Open relations using lock modes known to be obtained by index.c */
-//	if (!btshared->isconcurrent)
-//	{
-//		heapLockmode = ShareLock;
-//		indexLockmode = AccessExclusiveLock;
-//	}
-//	else
-//	{
-//		heapLockmode = ShareUpdateExclusiveLock;
-//		indexLockmode = RowExclusiveLock;
-//	}
 
 	/* Initialize worker's own spool */
 	btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
@@ -1172,9 +1118,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 						   int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
-	oIdxBuildState buildstate;
-	double		reltuples;
-//	IndexInfo  *indexInfo;
+	double		indtuples,
+				heaptuples;
 	ParallelOScanDesc poscan = &btshared->poscan;
 	OTable 		*o_table;
 	OTableDescr descr;
@@ -1186,7 +1131,6 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	coordinate->nParticipants = -1;
 	coordinate->sharedsort = sharedsort;
 
-	buildstate.ix_num = btshared->ix_num;
 	o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
 	o_fill_tmp_table_descr(&descr, o_table);
 	idx = descr.indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
@@ -1194,22 +1138,11 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	/* Begin "partial" tuplesort */
 	btspool->sortstate = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
 
-	/* Fill in worker buildstate */
-	buildstate.isunique = btshared->isunique;
-	buildstate.havedead = false;
-//	buildstate.heap = btspool->heap;
-	buildstate.spool = btspool;
-	buildstate.indtuples = 0;
-	buildstate.btleader = NULL;
-	/* Join parallel scan */
-////	indexInfo = BuildIndexInfo(btspool->index);
-////	indexInfo->ii_Concurrent = btshared->isconcurrent;
-
 	/*
 	 * Call build_secondary_index_worker_heap_scan() or
 	 * rebuild_index_worker_heap_scan();
 	 */
-	reltuples = btshared->worker_heap_scan_fn(&descr, idx, poscan, btspool->sortstate, progress);
+	indtuples = btshared->worker_heap_scan_fn(&descr, idx, poscan, btspool->sortstate, progress, &heaptuples);
 
 	/* Execute this worker's part of the sort */
 	if (progress)
@@ -1223,12 +1156,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	 */
 	SpinLockAcquire(&btshared->mutex);
 	btshared->nparticipantsdone++;
-	btshared->reltuples += reltuples;
-	if (buildstate.havedead)
-		btshared->havedead = true;
-	btshared->indtuples += buildstate.indtuples;
-////	if (indexInfo->ii_BrokenHotChain)
-////		btshared->brokenhotchain = true;
+	btshared->reltuples += heaptuples;
+	btshared->indtuples += indtuples;
 	SpinLockRelease(&btshared->mutex);
 
 	/* Notify leader */
@@ -1265,19 +1194,18 @@ bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
  * Put result into provided sortstate
  */
 static double
-build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, ParallelOScanDesc poscan, Tuplesortstate  *sortstate,  bool progress)
+build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, ParallelOScanDesc poscan, Tuplesortstate *sortstate, bool progress, double *heap_tuples)
 {
 	void 		   *sscan;
 	TupleTableSlot *primarySlot;
-	double		heap_tuples,
-				index_tuples;
+	double			index_tuples;
 
 	sscan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, COMMITSEQNO_INPROGRESS, poscan);
 	primarySlot = MakeSingleTupleTableSlot(descr->tupdesc, &TTSOpsOrioleDB);
 
-	heap_tuples = 0;
+	*heap_tuples = 0;
 	index_tuples = 0;
-	while (scan_getnextslot_allattrs(sscan, descr, primarySlot, &heap_tuples))
+	while (scan_getnextslot_allattrs(sscan, descr, primarySlot, heap_tuples))
 	{
 		OTuple		secondaryTup;
 		MemoryContext oldContext;
@@ -1319,31 +1247,24 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	uint64		ctid;
 	double 		heap_tuples,
 				index_tuples;
-	bool 		BrokenHotChain;
 	int 		nParallelWorkers = 3;
 	OIndexDescr *idx;
 
 	ctid = 1;
 	idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
 
-	buildstate.spool = NULL;
-	buildstate.indtuples = 0;
 	buildstate.btleader = NULL;
-	buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
-//	buildstate.heap = table_open(o_table->oids.reloid, AccessShareLock);
-
-	buildstate.ix_num = ix_num;
-	buildstate.o_table = o_table;
 
 	/* Attempt to launch parallel worker scan when required */
 	if (nParallelWorkers > 0)
 	{
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
-//		btspool->heap = buildstate.heap;
-		buildstate.spool = btspool;
 
-//		btspool->index = index_open(o_table->indices[ix_num].oids.reloid,
-//								   AccessShareLock); // Can we avoid opening index so early?
+		buildstate.indtuples = 0;
+		buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
+		buildstate.ix_num = ix_num;
+		buildstate.o_table = o_table;
+		buildstate.spool = btspool;
 
 		_o_index_begin_parallel(&buildstate, false, nParallelWorkers);
 	}
@@ -1367,14 +1288,14 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	/* Fill spool using either serial or parallel heap scan */
 	if (!buildstate.btleader)
 		/* Serial build */
-		index_tuples = build_secondary_index_worker_heap_scan(descr, idx, NULL, sortstate, false);
+		index_tuples = build_secondary_index_worker_heap_scan(descr, idx, NULL, sortstate, false, &heap_tuples);
 	else
 	{
 		/* We are on leader. Wait until workers end their scans */
-		index_tuples = _o_index_parallel_heapscan(&buildstate, &BrokenHotChain);
+		_o_index_parallel_heapscan(&buildstate);
+		index_tuples = buildstate.indtuples;
+		heap_tuples = buildstate.reltuples;
 	}
-
-	heap_tuples = index_tuples;
 
 	tuplesort_performsort(sortstate);
 
@@ -1389,7 +1310,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 
 	/* End serial/leader sort */
 	tuplesort_end_orioledb_index(sortstate);
-//	table_close(buildstate.heap, AccessShareLock);
 
 	/*
 	 * We hold oTablesAddLock till o_tables_update().  So, checkpoint number
