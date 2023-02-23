@@ -176,7 +176,6 @@ typedef struct oIdxLeader
 	 */
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
-//	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } oIdxLeader;
@@ -1162,6 +1161,8 @@ _o_index_parallel_scan_and_sort(oIdxSpool *btspool, oIdxShared *btshared, Shared
 	 */
 	SpinLockAcquire(&btshared->mutex);
 	btshared->nparticipantsdone++;
+	elog(DEBUG3, "Worker %d finished scan and local sort", btshared->nparticipantsdone);
+
 	btshared->reltuples += heaptuples;
 	btshared->indtuples += indtuples;
 	SpinLockRelease(&btshared->mutex);
