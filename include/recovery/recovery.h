@@ -24,6 +24,8 @@ extern Size recovery_shmem_needs(void);
 extern void recovery_shmem_init(Pointer ptr, bool found);
 extern bool is_recovery_process(void);
 extern CommitSeqNo recovery_map_oxid_csn(OXid oxid, bool *found);
+extern void worker_send_msg(int worker_id, Pointer msg, uint64 msg_size);
+extern void worker_queue_flush(int worker_id);
 
 extern void update_proc_retain_undo_location(int worker_id);
 

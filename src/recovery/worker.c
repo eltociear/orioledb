@@ -16,6 +16,7 @@
 
 #include "btree/modify.h"
 #include "catalog/o_tables.h"
+#include "catalog/indices.h"
 #include "recovery/recovery.h"
 #include "recovery/internal.h"
 #include "tableam/descr.h"
@@ -270,6 +271,9 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				data_pos;
 	bool		finished = false;
 	OXid		oxid;
+	Size 		expected_table_size = 0,
+				actual_table_size = 0;
+	char	   *o_table_serialized = NULL;
 
 	while (!finished)
 	{
@@ -336,6 +340,33 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 										tuple, false);
 				}
 				data_pos += tuple_len;
+			}
+			else if (recovery_header->type & RECOVERY_PARALLEL_INDEX_BUILD)
+			{
+				RecoveryMsgIdxBuild 	*msg = (RecoveryMsgIdxBuild *) (data + data_pos);
+				Size 					cur_chunk_size = data_size - offsetof(RecoveryMsgIdxBuild, o_table_serialized);
+
+				Assert(data_pos == 0);
+				if (msg->o_table_size)
+				{
+					actual_table_size = 0;
+					expected_table_size = msg->o_table_size;
+					o_table_serialized = palloc0(expected_table_size);
+				}
+
+				Assert(expected_table_size > 0 && o_table_serialized != NULL);
+				memcpy(o_table_serialized + actual_table_size, msg->o_table_serialized, cur_chunk_size);
+				actual_table_size += cur_chunk_size;
+				Assert(actual_table_size <= expected_table_size);
+
+				if (actual_table_size == expected_table_size)
+				{
+					/* participate as a worker in parallel index build */
+					_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
+					pfree(o_table_serialized);
+				}
+
+				data_pos += data_size;
 			}
 			else if (recovery_header->type & RECOVERY_COMMIT)
 			{

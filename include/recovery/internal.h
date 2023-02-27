@@ -54,8 +54,10 @@ extern uint64 recovery_queue_data_size;
 #define RECOVERY_TOAST_CONSISTENT ((uint16) 1 << 10)
 #define RECOVERY_SAVEPOINT ((uint16) 1 << 11)
 #define RECOVERY_ROLLBACK_TO_SAVEPOINT ((uint16) 1 << 12)
+#define RECOVERY_PARALLEL_INDEX_BUILD ((uint16) 1 << 13)
 #define RECOVERY_MODIFY (RECOVERY_INSERT | RECOVERY_DELETE | RECOVERY_UPDATE)
 #define RECOVERY_QUEUE_BUF_SIZE (8 * 1024)
+
 
 typedef struct
 {
@@ -74,6 +76,14 @@ typedef struct
 	RecoveryMsgHeader header;
 	XLogRecPtr	ptr;
 } RecoveryMsgPtr;
+
+typedef struct
+{
+	RecoveryMsgHeader header;
+	Size			  o_table_size;
+	char			  o_table_serialized[FLEXIBLE_ARRAY_MEMBER];
+} RecoveryMsgIdxBuild;
+
 
 typedef struct
 {

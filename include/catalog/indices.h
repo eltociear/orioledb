@@ -18,11 +18,92 @@
 #include "orioledb.h"
 
 #include "catalog/o_tables.h"
+#include "tableam/descr.h"
 
 typedef struct ODefineIndexContext
 {
 	Oid			oldNode;
 } ODefineIndexContext;
+
+/*
+ * Status record for spooling/sorting phase.  (Note we may have two of
+ * these due to the special requirements for uniqueness-checking with
+ * dead tuples.)
+ */
+typedef struct oIdxSpool
+{
+	Tuplesortstate **sortstates;	/* state data for tuplesort.c */
+	Relation	index;
+	OTable 	 	*o_table;
+	OTableDescr *descr;
+	bool		isunique;
+
+} oIdxSpool;
+
+/*
+ * Status for index builds performed in parallel.  This is allocated in a
+ * dynamic shared memory segment.  Note that there is a separate tuplesort TOC
+ * entry, private to tuplesort.c but allocated by this module on its behalf.
+ */
+typedef struct oIdxShared
+{
+	/*
+	 * These fields are not modified during the sort.  They primarily exist
+	 * for the benefit of worker processes that need to create oIdxSpool state
+	 * corresponding to that used by the leader.
+	 */
+	bool		isunique;
+	bool		isconcurrent;
+	int			scantuplesortstates;
+	int 		nrecoveryworkers;
+	/*
+	 * workersdonecv is used to monitor the progress of workers.  All parallel
+	 * participants must indicate that they are done before leader can use
+	 * mutable state that workers maintain during scan (and before leader can
+	 * proceed to tuplesort_performsort()).
+	 */
+	ConditionVariable workersdonecv;
+
+	/* Look for recovery workers joined parallel operation */
+	ConditionVariable recoveryworkersjoinedcv;
+
+	/*
+	 * mutex protects all fields before heapdesc.
+	 *
+	 * These fields contain status information of interest to B-Tree index
+	 * builds that must work just the same when an index is built in parallel.
+	 */
+	slock_t		mutex;
+	slock_t 	workersjoin_mutex;
+
+	/*
+	 * Mutable state that is maintained by workers, and reported back to
+	 * leader at end of parallel scan.
+	 *
+	 * nparticipantsdone is number of worker processes finished.
+	 *
+	 * reltuples is the total number of input heap tuples.
+	 *
+	 * indtuples is the total number of tuples that made it into the index.
+	 */
+	int			nparticipantsdone;
+	int 		nrecoveryworkersjoined;
+
+	double		reltuples;
+	double		indtuples[INDEX_MAX_KEYS];
+
+	/* Oriole-specific */
+	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
+	void       (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate **,
+					bool, double *, double **);
+	ParallelOScanDescData poscan;
+	OIndexNumber   ix_num;
+	Size 		   o_table_size;
+	char 		   o_table_serialized[];
+} oIdxShared;
+
+extern oIdxShared *recovery_oidxshared;
+extern Sharedsort *recovery_sharedsort;
 
 extern void o_define_index_validate(Relation rel, IndexStmt *stmt,
 									bool skip_build,
@@ -43,5 +124,7 @@ extern void recreate_o_table(OTable *old_o_table, OTable *o_table);
 extern void build_secondary_index(OTable *o_table, OTableDescr *descr,
 								  OIndexNumber ix_num);
 extern void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc);
-
+extern void _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
+										  char *o_table_serialized, Size o_table_size);
+extern Size _o_index_parallel_estimate_shared(Size o_table_size);
 #endif							/* __INDICES_H__ */
