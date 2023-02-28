@@ -22,6 +22,7 @@
 #include "catalog/indices.h"
 #include "catalog/o_sys_cache.h"
 #include "recovery/recovery.h"
+#include "recovery/internal.h"
 #include "recovery/wal.h"
 #include "tableam/descr.h"
 #include "tableam/operations.h"
@@ -71,77 +72,6 @@
  */
 
 /*
- * Status record for spooling/sorting phase.  (Note we may have two of
- * these due to the special requirements for uniqueness-checking with
- * dead tuples.)
- */
-typedef struct oIdxSpool
-{
-	Tuplesortstate **sortstates;	/* state data for tuplesort.c */
-	Relation	index;
-	OTable 	 	*o_table;
-	OTableDescr *descr;
-	bool		isunique;
-
-} oIdxSpool;
-
-/*
- * Status for index builds performed in parallel.  This is allocated in a
- * dynamic shared memory segment.  Note that there is a separate tuplesort TOC
- * entry, private to tuplesort.c but allocated by this module on its behalf.
- */
-typedef struct oIdxShared
-{
-	/*
-	 * These fields are not modified during the sort.  They primarily exist
-	 * for the benefit of worker processes that need to create oIdxSpool state
-	 * corresponding to that used by the leader.
-	 */
-	bool		isunique;
-	bool		isconcurrent;
-	int			scantuplesortstates;
-
-	/*
-	 * workersdonecv is used to monitor the progress of workers.  All parallel
-	 * participants must indicate that they are done before leader can use
-	 * mutable state that workers maintain during scan (and before leader can
-	 * proceed to tuplesort_performsort()).
-	 */
-	ConditionVariable workersdonecv;
-
-	/*
-	 * mutex protects all fields before heapdesc.
-	 *
-	 * These fields contain status information of interest to B-Tree index
-	 * builds that must work just the same when an index is built in parallel.
-	 */
-	slock_t		mutex;
-
-	/*
-	 * Mutable state that is maintained by workers, and reported back to
-	 * leader at end of parallel scan.
-	 *
-	 * nparticipantsdone is number of worker processes finished.
-	 *
-	 * reltuples is the total number of input heap tuples.
-	 *
-	 * indtuples is the total number of tuples that made it into the index.
-	 */
-	int			nparticipantsdone;
-	double		reltuples;
-	double		indtuples[INDEX_MAX_KEYS];
-
-	/* Oriole-specific */
-	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
-	void       (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate **,
-					bool, double *, double **);
-	ParallelOScanDescData poscan;
-	OIndexNumber   ix_num;
-	Size 		   o_table_size;
-	char 		   o_table_serialized[];
-} oIdxShared;
-
-/*
  * Return pointer to a oIdxShared's parallel table scan.
  *
  * c.f. shm_toc_allocate as to why BUFFERALIGN is used, rather than just
@@ -152,6 +82,8 @@ typedef struct oIdxShared
 
 /*
  * Status for leader in parallel index build.
+ * NB: It is inherited from bt_leader as separate entity, but could be made a part
+ * of oIdxBuildState which is also used only on leader.
  */
 typedef struct oIdxLeader
 {
@@ -183,10 +115,9 @@ typedef struct oIdxLeader
 } oIdxLeader;
 
 /*
- * Working state for btbuild and its callback.
- *
- * When parallel CREATE INDEX is used, there is a oIdxBuildState for each
- * participant.
+ * Working state for parallel build only used only for leader. It is used
+ * to store everything needed for workers into shmem or recovery_shmem and
+ * for leaderworker that also participated scan by default.
  */
 typedef struct oIdxBuildState
 {
@@ -209,7 +140,6 @@ typedef struct oIdxBuildState
 	OIndexNumber   	ix_num;
 } oIdxBuildState;
 static void _o_index_end_parallel(oIdxLeader *btleader);
-static Size _o_index_parallel_estimate_shared(Size o_table_size);
 static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
 static void build_secondary_index_worker_sort(oIdxSpool *btspool, void *btshared,
 											Sharedsort *sharedsort, int sortmem,
@@ -779,35 +709,37 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	pcxt = CreateParallelContext("orioledb", "_o_index_parallel_build_main",
 								 request);
 
-	scantuplesortstates = leaderparticipates ? request + 1 : request;
 	o_table_serialized = serialize_o_table(btspool->o_table, &o_table_size);
 
-	/*
-	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
-	 * PARALLEL_KEY_TUPLESORT tuplesort workspace
-	 */
-	/* Calls orioledb_parallelscan_estimate via tableam handler */
-	estbtshared = _o_index_parallel_estimate_shared(o_table_size);
-	shm_toc_estimate_chunk(&pcxt->estimator, estbtshared);
-	estsort = tuplesort_estimate_shared(scantuplesortstates);
-	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
+	if (!is_recovery_in_progress())
+	{
+		scantuplesortstates = leaderparticipates ? request + 1 : request;
+		/*
+		 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
+		 * PARALLEL_KEY_TUPLESORT tuplesort workspace
+		 */
+		 /* Calls orioledb_parallelscan_estimate via tableam handler */
+		estbtshared = _o_index_parallel_estimate_shared(o_table_size);
+		shm_toc_estimate_chunk(&pcxt->estimator, estbtshared);
+		estsort = tuplesort_estimate_shared(scantuplesortstates);
+		shm_toc_estimate_chunk(&pcxt->estimator, estsort);
 
-	shm_toc_estimate_keys(&pcxt->estimator, 2);
+		shm_toc_estimate_keys(&pcxt->estimator, 2);
 
-	/*
-	 * Estimate space for WalUsage and BufferUsage -- PARALLEL_KEY_WAL_USAGE
-	 * and PARALLEL_KEY_BUFFER_USAGE.
-	 *
-	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgWalUsage or
-	 * pgBufferUsage, so do it unconditionally.
-	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+		/*
+		 * Estimate space for WalUsage and BufferUsage -- PARALLEL_KEY_WAL_USAGE
+		 * and PARALLEL_KEY_BUFFER_USAGE.
+		 *
+		 * If there are no extensions loaded that care, we could skip this.  We
+		 * have no way of knowing whether anyone's looking at pgWalUsage or
+		 * pgBufferUsage, so do it unconditionally.
+		 */
+		shm_toc_estimate_chunk(&pcxt->estimator,
+							   mul_size(sizeof(WalUsage), pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+		shm_toc_estimate_chunk(&pcxt->estimator,
+							   mul_size(sizeof(BufferUsage), pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 //	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
 //	if (debug_query_string)
@@ -819,20 +751,45 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 //	else
 //		querylen = 0;			/* keep compiler quiet */
 
-	/* Everyone's had a chance to ask for space, so now create the DSM */
-	InitializeParallelDSM(pcxt);
+		/* Everyone's had a chance to ask for space, so now create the DSM */
+		InitializeParallelDSM(pcxt);
 
-	/* If no DSM segment was available, back out (do serial build) */
-	if (pcxt->seg == NULL)
+		/* If no DSM segment was available, back out (do serial build) */
+		if (pcxt->seg == NULL)
+		{
+			pfree(o_table_serialized);
+			DestroyParallelContext(pcxt);
+			ExitParallelMode();
+			return;
+		}
+
+		/* Store shared build state, for which we reserved space */
+		btshared = (oIdxShared *) shm_toc_allocate(pcxt->toc, estbtshared);
+		btshared->o_table_size = o_table_size;
+		sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
+
+		memmove(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
+
+	}
+	else
 	{
-		pfree(o_table_serialized);
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
-		return;
+		RecoveryMsgIdxBuild	msg;
+
+		scantuplesortstates = recovery_pool_size_guc;
+		btshared = recovery_oidxshared;
+		btshared->o_table_size = 0;
+		sharedsort = recovery_sharedsort;
+
+		/* Send o_table to recovery workers */
+		msg.header.type = RECOVERY_PARALLEL_INDEX_BUILD;
+		msg.ptr = o_table_serialized;
+		for (int i = 0; i < recovery_pool_size_guc; i++)
+		{
+			worker_send_msg(i, (Pointer) &msg, sizeof(RecoveryMsgHeader) + o_table_size);
+			worker_queue_flush(i);
+		}
 	}
 
-	/* Store shared build state, for which we reserved space */
-	btshared = (oIdxShared *) shm_toc_allocate(pcxt->toc, estbtshared);
 	/* Initialize immutable state */
 	btshared->isunique = btspool->isunique;
 	btshared->isconcurrent = isconcurrent;
@@ -843,25 +800,22 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->nparticipantsdone = 0;
 	btshared->reltuples = 0.0;
 	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
-
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->worker_heap_sort_fn = buildstate->worker_heap_sort_fn;
-
 	btshared->ix_num = buildstate->ix_num;
-	btshared->o_table_size = o_table_size;
-	memmove(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
 	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
-	/*
-	 * Store shared tuplesort-private state, for which we reserved space.
-	 * Then, initialize opaque state using tuplesort routine.
-	 */
-	sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
-	tuplesort_initialize_shared(sharedsort, scantuplesortstates,
-								pcxt->seg);
+	if(!is_recovery_in_progress())
+	{
+		/*
+		 * Store shared tuplesort-private state, for which we reserved space.
+		 * Then, initialize opaque state using tuplesort routine.
+		 */
+		tuplesort_initialize_shared(sharedsort, scantuplesortstates,
+									pcxt->seg);
 
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BTREE_SHARED, btshared);
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_BTREE_SHARED, btshared);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
 
 //	/* Store query string for workers */
 //	if (debug_query_string)
@@ -877,26 +831,39 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
 	 * initialize.
 	 */
-	walusage = shm_toc_allocate(pcxt->toc,
-								mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage);
-	bufferusage = shm_toc_allocate(pcxt->toc,
-								   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufferusage);
+		walusage = shm_toc_allocate(pcxt->toc,
+									mul_size(sizeof(WalUsage), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage);
+		bufferusage = shm_toc_allocate(pcxt->toc,
+									   mul_size(sizeof(BufferUsage), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufferusage);
 
-	/* Launch workers, saving status for leader/caller */
-	LaunchParallelWorkers(pcxt);
-	btleader->pcxt = pcxt;
-	btleader->nparticipanttuplesorts = pcxt->nworkers_launched;
-	if (leaderparticipates)
-		btleader->nparticipanttuplesorts++;
+		/* Launch workers, saving status for leader/caller */
+		LaunchParallelWorkers(pcxt);
+		btleader->pcxt = pcxt;
+		btleader->nparticipanttuplesorts = pcxt->nworkers_launched;
+		if (leaderparticipates)
+			btleader->nparticipanttuplesorts++;
+	}
+	else
+	{
+		/* XXX How to know actual shmem segment in case of recovery? */
+		tuplesort_initialize_shared(sharedsort, scantuplesortstates,
+									NULL);
+		btleader->nparticipanttuplesorts = recovery_pool_size_guc;
+		walusage = 0;
+		bufferusage = 0;
+
+		elog(WARNING, "Parallel index build uses %d recovery workers", btleader->nparticipanttuplesorts);
+	}
+
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
 	btleader->walusage = walusage;
 	btleader->bufferusage = bufferusage;
 
 	/* If no workers were successfully launched, back out (do serial build) */
-	if (pcxt->nworkers_launched == 0)
+	if (btleader->nparticipanttuplesorts == 0 && !is_recovery_in_progress())
 	{
 		_o_index_end_parallel(btleader);
 		return;
@@ -944,7 +911,7 @@ _o_index_end_parallel(oIdxLeader *btleader)
  * Returns size of shared memory required to store state for a parallel
  * btree index build based on the snapshot its parallel scan will use.
  */
-static Size
+Size
 _o_index_parallel_estimate_shared(Size o_table_size)
 {
 	Size size = add_size(BUFFERALIGN(sizeof(oIdxShared)), o_table_size);
@@ -1032,15 +999,23 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 #endif							/* BTREE_BUILD_STATS */
 }
 
-/* Private copy of _bt_parallel_build_main
- * - sharedsort2, spool2 removed
- * - calls _o_index_parallel_scan_and_sort
- */
 /*
- * Perform work within a launched parallel process.
+ * Perform work within a launched parallel process when not in recovery.
+ */
+void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+{
+	_o_index_parallel_build_inner(seg, toc, NULL, 0);
+}
+
+/*
+ * Private copy of _bt_parallel_build_main.
+ * For recovery attaches to recovery shared memory and gets
+ * serialized o_table as an explicit argument.
  */
 void
-_o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+_o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
+							char *recovery_o_table_serialized,
+							Size recovery_o_table_size)
 {
 //	char	   *sharedquery;
 	oIdxSpool    *btspool;
@@ -1069,19 +1044,33 @@ _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 //	/* Report the query string from leader */
 //	pgstat_report_activity(STATE_RUNNING, debug_query_string);
 
-	/* Look up nbtree shared state */
-	btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
-
 	/* Initialize worker's own spool */
 	btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
+
+	if(!is_recovery_in_progress())
+	{
+		Assert(recovery_o_table_size == 0 && recovery_o_table_serialized == NULL);
+		/* Look up nbtree shared state */
+		btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
+		btspool->o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
+		/* Look up shared state private to tuplesort.c */
+		sharedsort = shm_toc_lookup(toc, PARALLEL_KEY_TUPLESORT, false);
+	}
+	else
+	{
+		Assert(seg == NULL && toc == NULL);
+		/* Sharedsort and btshared are allocated in recovery workers shmem pool */
+		btshared = recovery_oidxshared;
+		sharedsort = recovery_sharedsort;
+		/* btshared in recovery is fixed size and doesn't contain o_table_serialized */
+		btspool->o_table = deserialize_o_table((Pointer)(recovery_o_table_serialized),
+												recovery_o_table_size);
+	}
+
 	btspool->isunique = btshared->isunique;
-	btspool->o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
+	tuplesort_attach_shared(sharedsort, seg);
 	btspool->descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
 	o_fill_tmp_table_descr(btspool->descr, btspool->o_table);
-
-	/* Look up shared state private to tuplesort.c */
-	sharedsort = shm_toc_lookup(toc, PARALLEL_KEY_TUPLESORT, false);
-	tuplesort_attach_shared(sharedsort, seg);
 
 	/* Prepare to track buffer usage during parallel execution */
 	InstrStartParallelQuery();
@@ -1272,7 +1261,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	buildstate.btleader = NULL;
 
 	/* Attempt to launch parallel worker scan when required */
-	if (nParallelWorkers > 0 && !is_recovery_in_progress())
+	if (nParallelWorkers > 0)
 	{
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 		btspool->o_table = o_table;

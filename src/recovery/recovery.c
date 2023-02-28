@@ -240,7 +240,6 @@ pg_atomic_uint64 *recovery_main_retain_ptr;
 pg_atomic_uint64 *recovery_finished_list_ptr;
 bool	   *recovery_single_process;
 
-
 static void update_run_xmin(void);
 static void free_run_xmin(void);
 static bool need_flush_undo_pos(int worker_id);
@@ -252,7 +251,6 @@ static void worker_wait_shutdown(RecoveryWorkerState *worker);
 static void replay_container(Pointer ptr, Pointer endPtr,
 							 bool single, XLogRecPtr xlogRecPtr);
 
-static inline void worker_send_msg(int worker_id, Pointer msg, uint64 msg_size);
 static void worker_send_modify(int worker_id, BTreeDescr *desc, uint16 recType,
 							   OTuple tuple, int tuple_len, bool wal);
 static void workers_send_finish(void);
@@ -262,7 +260,6 @@ static void workers_send_rollback_to_savepoint(XLogRecPtr ptr,
 											   SubTransactionId parentSubId);
 static void workers_synchronize(XLogRecPtr csn, bool send_synchronize);
 static void workers_notify_toast_consistent(void);
-static inline void worker_queue_flush(int worker_id);
 
 static inline bool apply_sys_tree_modify_record(int sys_tree_num, uint16 type,
 												OTuple tup,
@@ -289,6 +286,8 @@ recovery_shmem_needs(void)
 	size = add_size(size, CACHELINEALIGN(mul_size(sizeof(RecoveryWorkerPtrs),
 												  recovery_pool_size_guc + 1)));
 	size = add_size(size, CACHELINEALIGN(mul_size(sizeof(pg_atomic_uint64), 3)));
+	size = add_size(size, CACHELINEALIGN(_o_index_parallel_estimate_shared(0)));
+	size = add_size(size, CACHELINEALIGN(tuplesort_estimate_shared(recovery_pool_size_guc + 1)));
 
 	return size;
 }
@@ -320,12 +319,17 @@ recovery_shmem_init(Pointer ptr, bool found)
 
 	worker_ptrs = (RecoveryWorkerPtrs *) ptr;
 	ptr += CACHELINEALIGN(mul_size(sizeof(RecoveryWorkerPtrs), recovery_pool_size_guc));
-
 	recovery_ptr = (pg_atomic_uint64 *) ptr;
 	recovery_main_retain_ptr = recovery_ptr + 1;
 	recovery_finished_list_ptr = recovery_ptr + 2;
 
 	ptr += CACHELINEALIGN(mul_size(sizeof(pg_atomic_uint64), 3));
+
+	recovery_oidxshared = (oIdxShared *) ptr;
+	ptr += CACHELINEALIGN(_o_index_parallel_estimate_shared(0));
+
+	recovery_sharedsort = (Sharedsort *) ptr;
+	ptr += CACHELINEALIGN(tuplesort_estimate_shared(recovery_pool_size_guc + 1));
 
 	recovery_queue_data_size = recovery_queue_size_guc;
 
@@ -2100,7 +2104,7 @@ o_xact_redo_hook(TransactionId xid, XLogRecPtr lsn)
 /*
  * Sends the message to a worker.
  */
-static inline void
+void
 worker_send_msg(int worker_id, Pointer msg, uint64 msg_size)
 {
 	RecoveryWorkerState *state = &workers_pool[worker_id];
@@ -2388,7 +2392,7 @@ workers_notify_toast_consistent(void)
 /*
  * Flushes a queue buffer to the queue.
  */
-static inline void
+void
 worker_queue_flush(int worker_id)
 {
 	RecoveryWorkerState *state = &workers_pool[worker_id];
