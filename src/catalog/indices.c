@@ -24,7 +24,7 @@
 #include "recovery/recovery.h"
 #include "recovery/internal.h"
 #include "recovery/wal.h"
-#include "tableam/descr.h"
+//#include "tableam/descr.h"
 #include "tableam/operations.h"
 #include "transam/oxid.h"
 #include "tuple/slot.h"
