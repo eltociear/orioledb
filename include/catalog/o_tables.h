@@ -89,7 +89,7 @@ typedef struct
 	OCompress	primary_compress;
 	OCompress	toast_compress;
 	uint16		nfields;
-	uint16		primary_init_nfields;
+	uint16		nfields_initial;
 	uint16		nindices;
 	Oid			tid_btree_ops_oid;	/* have to store it here */
 	bool		has_primary;

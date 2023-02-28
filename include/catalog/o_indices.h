@@ -31,13 +31,24 @@ typedef struct
 	/* pkey fields added implicitly in o_o_define_index_validate not counted */
 	uint16		nIncludedFields;
 	uint16		nLeafFields;
+	/*
+	 * Number of leaf fields during index creation.  Use this to keep
+	 * OTupleFixedFormatSpec stable when new fields are added to the primary
+	 * index.
+	 */
+	uint16		nLeafFieldsInitial;
 	uint16		nNonLeafFields;
 
 	/*
-	 * TOAST index: pkey field amount, excluding included fields, including 2
-	 * fields: attnum and offset Primary index: amount of uniq fields in index
-	 * Unique index: field amount, excluding included and pkey fields Regular
-	 * index: all field amount
+	 * TOAST index: number of pkey fields, excluding included fields, including 2
+	 * fields: attnum and offset.
+	 *
+	 * Primary index: number of unique fields in index.
+	 *
+	 * Unique index: numbfer of fields, excluding included fields and pkey
+	 * fields.
+	 *
+	 * Regular index: number of all fields.
 	 */
 	uint16		nUniqueFields;
 	/* non-TOAST index: field amount, excluding included and pkey fields */

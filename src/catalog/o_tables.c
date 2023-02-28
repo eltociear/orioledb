@@ -607,8 +607,7 @@ o_table_tableam_create(ORelOids oids, TupleDesc tupdesc)
 	int			i;
 
 	o_table = palloc0(sizeof(OTable));
-	o_table->nfields = tupdesc->natts;
-	o_table->primary_init_nfields = o_table->nfields + 1;	/* + ctid field */
+	o_table->nfields_initial = o_table->nfields = tupdesc->natts;
 	o_table->fields = palloc0(o_table->nfields * sizeof(OTableField));
 	o_table->oids = oids;
 	o_table->tid_btree_ops_oid = GetDefaultOpClass(TIDOID, BTREE_AM_OID);

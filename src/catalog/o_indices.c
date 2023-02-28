@@ -186,6 +186,7 @@ make_ctid_o_index(OTable *table)
 	result->primaryIsCtid = true;
 	result->compress = table->primary_compress;
 	result->nLeafFields = table->nfields + 1;
+	result->nLeafFieldsInitial = table->nfields_initial + 1;
 	result->nNonLeafFields = 1;
 	result->nPrimaryFields = 0;
 	result->nKeyFields = 1;
@@ -244,6 +245,7 @@ make_primary_o_index(OTable *table)
 	else
 		result->compress = table->primary_compress;
 	result->nLeafFields = table->nfields;
+	result->nLeafFieldsInitial = table->nfields_initial;
 	result->nNonLeafFields = tableIndex->nkeyfields;
 	result->nIncludedFields = tableIndex->nfields - tableIndex->nkeyfields;
 	result->nPrimaryFields = 0;
@@ -384,6 +386,7 @@ make_secondary_o_index(OTable *table, OTableIndex *tableIndex)
 	Assert(j <= result->nLeafFields);
 	result->nLeafFields = j;
 	result->nNonLeafFields = j;
+	result->nLeafFieldsInitial = j;
 
 	if (tableIndex->type == oIndexUnique)
 		result->nUniqueFields = result->nKeyFields;
@@ -452,6 +455,7 @@ make_toast_o_index(OTable *table)
 	j++;
 	Assert(j <= result->nLeafFields);
 	result->nLeafFields = j;
+	result->nLeafFieldsInitial = j;
 
 	return result;
 }
@@ -623,14 +627,14 @@ make_o_index(OTable *table, OIndexNumber ixNum)
 
 static void
 fillFixedFormatSpec(TupleDesc tupdesc, OTupleFixedFormatSpec *spec,
-					bool mayHaveToast, uint16 *primary_init_nfields)
+					bool mayHaveToast, int nFieldsInitial)
 {
 	int			i,
 				len = 0;
 	int			natts;
 
-	if (primary_init_nfields)
-		natts = *primary_init_nfields;
+	if (nFieldsInitial >= 0)
+		natts = nFieldsInitial;
 	else
 		natts = tupdesc->natts;
 	for (i = 0; i < natts; i++)
@@ -652,7 +656,6 @@ o_index_fill_descr(OIndexDescr *descr, OIndex *oIndex)
 {
 	int			i;
 	int			maxTableAttnum = 0;
-	uint16	   *primary_init_nfields = NULL;
 	ListCell   *lc;
 	MemoryContext mcxt,
 				old_mcxt;
@@ -665,15 +668,13 @@ o_index_fill_descr(OIndexDescr *descr, OIndex *oIndex)
 	namestrcpy(&descr->name, oIndex->name.data);
 	descr->leafTupdesc = o_table_fields_make_tupdesc(oIndex->leafFields,
 													 oIndex->nLeafFields);
+
 	if (oIndex->indexType == oIndexPrimary)
 	{
 		OTable	   *o_table = o_tables_get(descr->tableOids);
-
 		if (o_table)
 		{
 			o_tupdesc_load_constr(descr->leafTupdesc, o_table, descr);
-			primary_init_nfields = palloc(sizeof(*primary_init_nfields));
-			*primary_init_nfields = o_table->primary_init_nfields;
 			o_table_free(o_table);
 		}
 	}
@@ -801,11 +802,9 @@ o_index_fill_descr(OIndexDescr *descr, OIndex *oIndex)
 
 	fillFixedFormatSpec(descr->leafTupdesc, &descr->leafSpec,
 						(oIndex->indexType == oIndexPrimary),
-						primary_init_nfields);
+						oIndex->nLeafFieldsInitial);
 	fillFixedFormatSpec(descr->nonLeafTupdesc, &descr->nonLeafSpec,
-						false, NULL);
-	if (primary_init_nfields)
-		pfree(primary_init_nfields);
+						false, -1);
 }
 
 bool

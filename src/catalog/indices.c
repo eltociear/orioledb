@@ -428,7 +428,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 			{
 				ix_num = 0;		/* place first */
 				o_table->has_primary = true;
-				o_table->primary_init_nfields = o_table->nfields;
+				o_table->nfields_initial = o_table->nfields;
 			}
 			else
 			{
@@ -853,7 +853,7 @@ drop_primary_index(Relation rel, OTable *o_table)
 			(o_table->nindices - 1) * sizeof(OTableIndex));
 	o_table->nindices--;
 	o_table->has_primary = false;
-	o_table->primary_init_nfields = o_table->nfields + 1;	/* + ctid field */
+	o_table->nfields_initial = o_table->nfields;
 
 	old_descr = o_fetch_table_descr(old_o_table->oids);
 
