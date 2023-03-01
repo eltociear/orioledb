@@ -654,6 +654,28 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 		LWLockRelease(&checkpoint_state->oTablesAddLock);
 }
 
+/* Send o_table to recovery workers */
+static void
+workers_send_o_table(Pointer o_table_serialized, int o_table_size)
+{
+	RecoveryMsgIdxBuild	msg;
+	uint64				 msg_size;
+	int 				i;
+
+	msg.header.type = RECOVERY_PARALLEL_INDEX_BUILD;
+	msg.ptr = o_table_serialized;
+	msg_size = sizeof(RecoveryMsgHeader) + o_table_size;
+
+	elog(WARNING, "%lu bytes of o_table send to all recovery workers", msg_size);
+
+	for (i = 0; i < recovery_pool_size_guc; i++)
+	{
+		worker_send_msg(i, (Pointer) &msg, msg_size);
+		worker_queue_flush(i);
+	}
+//	elog(PANIC, "test");
+}
+
 /*
  * Private copy of _bt_begin_parallel.
  * - calls orioledb-specific sort routines
@@ -773,21 +795,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	}
 	else
 	{
-		RecoveryMsgIdxBuild	msg;
 
 		scantuplesortstates = recovery_pool_size_guc;
 		btshared = recovery_oidxshared;
 		btshared->o_table_size = 0;
 		sharedsort = recovery_sharedsort;
 
-		/* Send o_table to recovery workers */
-		msg.header.type = RECOVERY_PARALLEL_INDEX_BUILD;
-		msg.ptr = o_table_serialized;
-		for (int i = 0; i < recovery_pool_size_guc; i++)
-		{
-			worker_send_msg(i, (Pointer) &msg, sizeof(RecoveryMsgHeader) + o_table_size);
-			worker_queue_flush(i);
-		}
+		workers_send_o_table(o_table_serialized, o_table_size);
 	}
 
 	/* Initialize immutable state */

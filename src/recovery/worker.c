@@ -341,13 +341,17 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			else if (recovery_header->type & RECOVERY_PARALLEL_INDEX_BUILD)
 			{
 				char *o_table_serialized;
+				uint64	o_table_size = data_size - sizeof(RecoveryMsgHeader);
 
-				o_table_serialized = palloc0(data_size);
+				o_table_serialized = palloc0(o_table_size);
 				Assert(data_pos == 0);
-				memcpy (o_table_serialized, data + data_pos, data_size);
+				data_pos += sizeof(RecoveryMsgHeader);
+				memcpy (o_table_serialized, data + data_pos, o_table_size);
 				/* participate as a worker in parallel index build */
-				_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, data_size);
+//				elog(PANIC, "ended _o_index_parallel_build_inner on worker");
+				_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, o_table_size);
 				pfree(o_table_serialized);
+				data_pos += o_table_size;
 			}
 			else if (recovery_header->type & RECOVERY_COMMIT)
 			{
