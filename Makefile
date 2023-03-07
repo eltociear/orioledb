@@ -81,6 +81,7 @@ REGRESSCHECKS = btree_sys_check \
 				ddl \
 				explain \
 				foreign_keys \
+				generated \
 				indices \
 				indices_build \
 				inherits \
