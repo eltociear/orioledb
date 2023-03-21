@@ -349,7 +349,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				memcpy (o_table_serialized, data + data_pos, o_table_size);
 				/* participate as a worker in parallel index build */
 //				elog(PANIC, "ended _o_index_parallel_build_inner on worker");
-				_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, o_table_size);
+				_o_index_parallel_build_inner(NULL, NULL, data + data_pos, o_table_size);
 				pfree(o_table_serialized);
 				data_pos += o_table_size;
 			}
