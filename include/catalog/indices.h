@@ -96,8 +96,8 @@ typedef struct oIdxShared
 	char 		   o_table_serialized[];
 } oIdxShared;
 
-oIdxShared *recovery_oidxshared;
-Sharedsort *recovery_sharedsort;
+extern oIdxShared *recovery_oidxshared;
+extern Sharedsort *recovery_sharedsort;
 
 extern void o_define_index_validate(Relation rel, IndexStmt *stmt,
 									bool skip_build,

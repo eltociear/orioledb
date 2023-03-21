@@ -24,7 +24,6 @@
 #include "recovery/recovery.h"
 #include "recovery/internal.h"
 #include "recovery/wal.h"
-//#include "tableam/descr.h"
 #include "tableam/operations.h"
 #include "transam/oxid.h"
 #include "tuple/slot.h"
@@ -155,6 +154,8 @@ typedef struct NewColumnValue
 }			NewColumnValue;
 
 bool		in_indexes_rebuild = false;
+oIdxShared 	*recovery_oidxshared = NULL;
+Sharedsort  *recovery_sharedsort = NULL;
 
 bool
 is_in_indexes_rebuild(void)
@@ -722,11 +723,11 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 #ifdef DISABLE_LEADER_PARTICIPATION
 	leaderparticipates = false;
 #endif
-
+	bool 		in_recovery = is_recovery_in_progress();
 
 	o_table_serialized = serialize_o_table(btspool->o_table, &o_table_size);
 
-	if (!is_recovery_in_progress())
+	if (!in_recovery)
 	{
 		/*
 		 * Enter parallel mode, and create context for parallel build of btree
@@ -826,7 +827,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->ix_num = buildstate->ix_num;
 	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
-	if(!is_recovery_in_progress())
+	if(!in_recovery)
 	{
 		/*
 		 * Store shared tuplesort-private state, for which we reserved space.
@@ -866,19 +867,17 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		if (leaderparticipates)
 			btleader->nparticipanttuplesorts++;
 	}
-	else if (scantuplesortstates != 0)
+	else
 	{
-		/* XXX How to know actual shmem segment in case of recovery? */
-		tuplesort_initialize_shared(sharedsort, scantuplesortstates,
-									NULL);
 		btleader->nparticipanttuplesorts = btshared->scantuplesortstates;
 		walusage = 0;
 		bufferusage = 0;
 
+		if (btshared->scantuplesortstates != 0)
+			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
+
 		elog(WARNING, "Parallel index build uses %d recovery workers", btleader->nparticipanttuplesorts);
 	}
-	else
-		btleader->nparticipanttuplesorts = 0;
 
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
@@ -888,7 +887,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (btleader->nparticipanttuplesorts == 0)
 	{
-		if (!is_recovery_in_progress())
+		if (!in_recovery)
 			_o_index_end_parallel(btleader);
 		return;
 	}
@@ -904,7 +903,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
 	 */
-	if(!is_recovery_in_progress())
+	if(!in_recovery)
 		WaitForParallelWorkersToAttach(pcxt);
 }
 
