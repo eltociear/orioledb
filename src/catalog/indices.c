@@ -810,7 +810,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		sharedsort = recovery_sharedsort;
 
 		if (btshared->nrecoveryworkers != 0)
-			workers_send_o_table(o_table_serialized, o_table_size, scantuplesortstates);
+			workers_send_o_table(o_table_serialized, o_table_size, btshared->nrecoveryworkers);
 	}
 
 	/* Initialize immutable state */
