@@ -799,8 +799,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	}
 	else
 	{
-		scantuplesortstates = *recovery_single_process ? 0 : recovery_pool_size_guc;
 		btshared = recovery_oidxshared;
+		btshared->nrecoveryworkers = *recovery_single_process ? 0 : recovery_pool_size_guc;
+		scantuplesortstates = leaderparticipates ? btshared->nrecoveryworkers + 1 : btshared->nrecoveryworkers;
 		/*
 		 * Table is transferred to recovery workers later using workers_send_o_table()
 		 * It doesn't occupy scapce in btshared
@@ -808,7 +809,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		btshared->o_table_size = 0;
 		sharedsort = recovery_sharedsort;
 
-		if (scantuplesortstates != 0)
+		if (btshared->nrecoveryworkers != 0)
 			workers_send_o_table(o_table_serialized, o_table_size, scantuplesortstates);
 	}
 
@@ -821,7 +822,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	SpinLockInit(&btshared->mutex);
 	/* Initialize mutable state */
 	btshared->nparticipantsdone = 0;
-	btshared->nrecoveryworkersjoined =0;
+	btshared->nrecoveryworkersjoined = 0;
 	btshared->reltuples = 0.0;
 	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
@@ -873,10 +874,10 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		walusage = 0;
 		bufferusage = 0;
 
-		if (btshared->scantuplesortstates != 0)
+		if (btshared->nrecoveryworkers != 0)
 			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
 
-		elog(WARNING, "Parallel index build uses %d recovery workers", btleader->nparticipanttuplesorts);
+		elog(WARNING, "Parallel index build uses %d recovery workers", btshared->nrecoveryworkers);
 	}
 
 	btleader->btshared = btshared;
@@ -885,11 +886,18 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btleader->bufferusage = bufferusage;
 
 	/* If no workers were successfully launched, back out (do serial build) */
-	if (btleader->nparticipanttuplesorts == 0)
+	if (!in_recovery)
 	{
-		if (!in_recovery)
+		if (btleader->nparticipanttuplesorts == 0)
+		{
 			_o_index_end_parallel(btleader);
-		return;
+			return;
+		}
+	}
+	else
+	{
+		if (btshared->nrecoveryworkers == 0)
+			return;
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
@@ -907,7 +915,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		WaitForParallelWorkersToAttach(pcxt);
 	else
 	{
-		while(btshared->nrecoveryworkersjoined < btleader->nparticipanttuplesorts)
+		while(btshared->nrecoveryworkersjoined < btshared->nrecoveryworkers)
 		{
 			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}

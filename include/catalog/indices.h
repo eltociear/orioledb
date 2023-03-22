@@ -55,7 +55,7 @@ typedef struct oIdxShared
 	bool		isunique;
 	bool		isconcurrent;
 	int			scantuplesortstates;
-
+	int 		nrecoveryworkers;
 	/*
 	 * workersdonecv is used to monitor the progress of workers.  All parallel
 	 * participants must indicate that they are done before leader can use
