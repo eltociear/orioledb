@@ -657,7 +657,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 
 /* Send o_table to recovery workers */
 static void
-workers_send_o_table(Pointer o_table_serialized, int o_table_size, int scantuplesortstates)
+workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 {
 	RecoveryMsgIdxBuild	msg;
 	uint64				 msg_size;
@@ -670,7 +670,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size, int scantuple
 
 	elog(WARNING, "%lu bytes of o_table send to all recovery workers", msg_size);
 
-	for (i = 0; i < scantuplesortstates; i++)
+	for (i = 0; i < recovery_pool_size_guc; i++)
 	{
 		worker_send_msg(i, (Pointer) &msg, msg_size);
 		worker_queue_flush(i);
@@ -810,7 +810,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		sharedsort = recovery_sharedsort;
 
 		if (btshared->nrecoveryworkers != 0)
-			workers_send_o_table(o_table_serialized, o_table_size, btshared->nrecoveryworkers);
+			workers_send_o_table(o_table_serialized, o_table_size);
 	}
 
 	/* Initialize immutable state */
@@ -890,6 +890,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	{
 		if (btleader->nparticipanttuplesorts == 0)
 		{
+			pfree(&btshared->o_table_serialized);
 			_o_index_end_parallel(btleader);
 			return;
 		}
@@ -897,7 +898,10 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	else
 	{
 		if (btshared->nrecoveryworkers == 0)
+		{
+			pfree(o_table_serialized);
 			return;
+		}
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
@@ -919,6 +923,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		{
 			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
+		pfree(o_table_serialized);
 	}
 }
 
