@@ -817,9 +817,11 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->isconcurrent = isconcurrent;
 	btshared->scantuplesortstates = scantuplesortstates;
 	ConditionVariableInit(&btshared->workersdonecv);
+	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
 	SpinLockInit(&btshared->mutex);
 	/* Initialize mutable state */
 	btshared->nparticipantsdone = 0;
+	btshared->nrecoveryworkersjoined =0;
 	btshared->reltuples = 0.0;
 	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
@@ -863,9 +865,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		/* Launch workers, saving status for leader/caller */
 		LaunchParallelWorkers(pcxt);
 		btleader->pcxt = pcxt;
-		btleader->nparticipanttuplesorts = pcxt->nworkers_launched;
-		if (leaderparticipates)
-			btleader->nparticipanttuplesorts++;
+		btleader->nparticipanttuplesorts = leaderparticipates ? pcxt->nworkers_launched + 1 : pcxt->nworkers_launched;
 	}
 	else
 	{
@@ -905,6 +905,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	 */
 	if(!in_recovery)
 		WaitForParallelWorkersToAttach(pcxt);
+	else
+	{
+		while(btshared->nrecoveryworkersjoined < btleader->nparticipanttuplesorts)
+		{
+			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		}
+	}
 }
 
 /*
@@ -1159,6 +1166,12 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 
 	o_table = btspool->o_table;
 	idx = btspool->descr->indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
+
+	/* Track recovery workers joined parallel operation */
+	SpinLockAcquire(&btshared->mutex);
+	btshared->nrecoveryworkersjoined++;
+	SpinLockRelease(&btshared->mutex);
+	ConditionVariableSignal(&btshared->recoveryworkersjoinedcv);
 
 	/* Begin "partial" tuplesort */
 	btspool->sortstates = palloc0(sizeof(Tuplesortstate));

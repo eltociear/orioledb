@@ -64,6 +64,9 @@ typedef struct oIdxShared
 	 */
 	ConditionVariable workersdonecv;
 
+	/* Look for recovery workers joined parallel operation */
+	ConditionVariable recoveryworkersjoinedcv;
+
 	/*
 	 * mutex protects all fields before heapdesc.
 	 *
@@ -83,6 +86,8 @@ typedef struct oIdxShared
 	 * indtuples is the total number of tuples that made it into the index.
 	 */
 	int			nparticipantsdone;
+	int 		nrecoveryworkersjoined;
+
 	double		reltuples;
 	double		indtuples[INDEX_MAX_KEYS];
 
