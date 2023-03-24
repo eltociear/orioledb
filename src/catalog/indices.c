@@ -811,6 +811,8 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 
 		if (btshared->nrecoveryworkers != 0)
 			workers_send_o_table(o_table_serialized, o_table_size);
+
+		pfree(o_table_serialized);
 	}
 
 	/* Initialize immutable state */
@@ -899,10 +901,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	else
 	{
 		if (btshared->nrecoveryworkers == 0)
-		{
-			pfree(o_table_serialized);
 			return;
-		}
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
@@ -925,7 +924,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		{
 			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
-		pfree(o_table_serialized);
 	}
 }
 
