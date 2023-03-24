@@ -664,7 +664,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 	int 				i;
 
 	msg = palloc(msg_size);
-	Assert(! *recovery_single_process);
+	Assert(!(*recovery_single_process));
 	msg->header.type = RECOVERY_PARALLEL_INDEX_BUILD;
 	memcpy(&msg->o_table_serialized, o_table_serialized, o_table_size);
 
@@ -676,7 +676,6 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 		worker_queue_flush(i);
 	}
 	pfree(msg);
-	//	elog(PANIC, "test");
 }
 
 /*
@@ -788,13 +787,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	}
 	else
 	{
+		/*
+		 * o_table is transferred to recovery workers using workers_send_o_table()
+		 * and doesn't occupy space in btshared
+		 */
 		btshared = recovery_oidxshared;
 		btshared->nrecoveryworkers = *recovery_single_process ? 0 : recovery_pool_size_guc;
 		scantuplesortstates = leaderparticipates ? btshared->nrecoveryworkers + 1 : btshared->nrecoveryworkers;
-		/*
-		 * Table is transferred to recovery workers later using workers_send_o_table()
-		 * It doesn't occupy space in btshared
-		 */
 		btshared->o_table_size = o_table_size;
 		sharedsort = recovery_sharedsort;
 
@@ -808,18 +807,18 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->isunique = btspool->isunique;
 	btshared->isconcurrent = isconcurrent;
 	btshared->scantuplesortstates = scantuplesortstates;
-	ConditionVariableInit(&btshared->workersdonecv);
-	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
-	SpinLockInit(&btshared->mutex);
-	SpinLockInit(&btshared->workersjoin_mutex);
-	/* Initialize mutable state */
-	btshared->nparticipantsdone = 0;
-	btshared->nrecoveryworkersjoined = 0;
-	btshared->reltuples = 0.0;
-	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
+	btshared->ix_num = buildstate->ix_num;
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->worker_heap_sort_fn = buildstate->worker_heap_sort_fn;
-	btshared->ix_num = buildstate->ix_num;
+	/* Initialize mutable state */
+	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
+	ConditionVariableInit(&btshared->workersdonecv);
+	SpinLockInit(&btshared->workersjoin_mutex);
+	SpinLockInit(&btshared->mutex);
+	btshared->nrecoveryworkersjoined = 0;
+	btshared->nparticipantsdone = 0;
+	btshared->reltuples = 0.0;
+	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
 	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
 	if(!in_recovery)
@@ -834,10 +833,10 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_BTREE_SHARED, btshared);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
 
-	/*
-	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
-	 * initialize.
-	 */
+		/*
+		 * Allocate space for each worker's WalUsage and BufferUsage; no need to
+		 * initialize.
+		 */
 		walusage = shm_toc_allocate(pcxt->toc,
 									mul_size(sizeof(WalUsage), pcxt->nworkers));
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage);
@@ -852,9 +851,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	}
 	else
 	{
-		btleader->nparticipanttuplesorts = btshared->scantuplesortstates;
 		walusage = 0;
 		bufferusage = 0;
+		btleader->nparticipanttuplesorts = btshared->scantuplesortstates;
 
 		if (btshared->nrecoveryworkers != 0)
 			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
