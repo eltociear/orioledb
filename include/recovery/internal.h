@@ -80,7 +80,7 @@ typedef struct
 typedef struct
 {
 	RecoveryMsgHeader header;
-	char		*ptr;
+	char		o_table_serialized[FLEXIBLE_ARRAY_MEMBER];
 } RecoveryMsgIdxBuild;
 
 
