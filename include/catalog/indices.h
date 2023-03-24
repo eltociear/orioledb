@@ -74,6 +74,7 @@ typedef struct oIdxShared
 	 * builds that must work just the same when an index is built in parallel.
 	 */
 	slock_t		mutex;
+	slock_t 	workersjoin_mutex;
 
 	/*
 	 * Mutable state that is maintained by workers, and reported back to
