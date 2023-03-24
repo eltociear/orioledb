@@ -659,23 +659,24 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 static void
 workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 {
-	RecoveryMsgIdxBuild	msg;
-	uint64				 msg_size;
+	RecoveryMsgIdxBuild	*msg;
+	uint64				 msg_size = sizeof(RecoveryMsgHeader) + o_table_size;
 	int 				i;
 
+	msg = palloc(msg_size);
 	Assert(! *recovery_single_process);
-	msg.header.type = RECOVERY_PARALLEL_INDEX_BUILD;
-	msg.ptr = o_table_serialized;
-	msg_size = sizeof(RecoveryMsgHeader) + o_table_size;
+	msg->header.type = RECOVERY_PARALLEL_INDEX_BUILD;
+	memcpy(&msg->o_table_serialized, o_table_serialized, o_table_size);
 
 	elog(WARNING, "%lu bytes of o_table send to all recovery workers", msg_size);
 
 	for (i = 0; i < recovery_pool_size_guc; i++)
 	{
-		worker_send_msg(i, (Pointer) &msg, msg_size);
+		worker_send_msg(i, (Pointer) msg, msg_size);
 		worker_queue_flush(i);
 	}
-//	elog(PANIC, "test");
+	pfree(msg);
+	//	elog(PANIC, "test");
 }
 
 /*
@@ -716,7 +717,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
-//	int			querylen;
 	int 		o_table_size;
 	Pointer 	o_table_serialized;
 
@@ -767,16 +767,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 							   mul_size(sizeof(BufferUsage), pcxt->nworkers));
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
 
-//	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
-//	if (debug_query_string)
-//	{
-//		querylen = strlen(debug_query_string);
-//		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
-//		shm_toc_estimate_keys(&pcxt->estimator, 1);
-//	}
-//	else
-//		querylen = 0;			/* keep compiler quiet */
-
 		/* Everyone's had a chance to ask for space, so now create the DSM */
 		InitializeParallelDSM(pcxt);
 
@@ -795,7 +785,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
 
 		memmove(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
-
 	}
 	else
 	{
@@ -804,9 +793,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		scantuplesortstates = leaderparticipates ? btshared->nrecoveryworkers + 1 : btshared->nrecoveryworkers;
 		/*
 		 * Table is transferred to recovery workers later using workers_send_o_table()
-		 * It doesn't occupy scapce in btshared
+		 * It doesn't occupy space in btshared
 		 */
-		btshared->o_table_size = 0;
+		btshared->o_table_size = o_table_size;
 		sharedsort = recovery_sharedsort;
 
 		if (btshared->nrecoveryworkers != 0)
@@ -844,16 +833,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_BTREE_SHARED, btshared);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
-
-//	/* Store query string for workers */
-//	if (debug_query_string)
-//	{
-//		char	   *sharedquery;
-//
-//		sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
-//		memcpy(sharedquery, debug_query_string, querylen + 1);
-//		shm_toc_insert(pcxt->toc, PARALLEL_KEY_QUERY_TEXT, sharedquery);
-//	}
 
 	/*
 	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
@@ -911,6 +890,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	if (leaderparticipates)
 		_o_index_leader_participate_as_worker(buildstate);
 
+	Assert(in_recovery == is_recovery_in_progress());
 	/*
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
@@ -1128,11 +1108,14 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 	pfree(btspool->descr);
 	pfree(btspool);
 
-	/* Report WAL/buffer usage during parallel execution */
-	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
-	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
-						  &walusage[ParallelWorkerNumber]);
+	if (!is_recovery_in_progress())
+	{
+		/* Report WAL/buffer usage during parallel execution */
+		bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
+		walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
+		InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+							  &walusage[ParallelWorkerNumber]);
+	}
 
 #ifdef BTREE_BUILD_STATS
 	if (log_btree_build_stats)
@@ -1371,7 +1354,8 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 	if (buildstate.btleader)
 	{
 		pfree(btspool);
-		_o_index_end_parallel(buildstate.btleader);
+		if(! is_recovery_in_progress())
+			_o_index_end_parallel(buildstate.btleader);
 	}
 
 	/*
