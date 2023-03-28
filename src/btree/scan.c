@@ -1111,6 +1111,7 @@ make_btree_seq_scan_internal(BTreeDescr *desc, CommitSeqNo csn,
 	scan->initialized = false;
 	scan->checkpointNumberSet = false;
 	scan->haveHistImg = false;
+	BTREE_PAGE_LOCATOR_SET_INVALID(&scan->leafLoc);
 
 	dlist_push_tail(&listOfScans, &scan->listNode);
 
