@@ -1110,6 +1110,7 @@ make_btree_seq_scan_internal(BTreeDescr *desc, CommitSeqNo csn,
 	scan->dsmSeg = NULL;
 	scan->initialized = false;
 	scan->checkpointNumberSet = false;
+	scan->haveHistImg = false;
 
 	dlist_push_tail(&listOfScans, &scan->listNode);
 
