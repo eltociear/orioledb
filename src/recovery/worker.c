@@ -271,6 +271,9 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				data_pos;
 	bool		finished = false;
 	OXid		oxid;
+	Size 		expected_table_size,
+				actual_table_size = 0;
+	char	   *o_table_serialized;
 
 	while (!finished)
 	{
@@ -340,13 +343,29 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			}
 			else if (recovery_header->type & RECOVERY_PARALLEL_INDEX_BUILD)
 			{
-				uint64	o_table_size = data_size - sizeof(RecoveryMsgHeader);
+				RecoveryMsgIdxBuild 	*msg = (RecoveryMsgIdxBuild *) (data + data_pos);
+				Size 					cur_chunk_size = data_size - offsetof(RecoveryMsgIdxBuild, o_table_serialized);
 
 				Assert(data_pos == 0);
-				data_pos += sizeof(RecoveryMsgHeader);
-				/* participate as a worker in parallel index build */
-				_o_index_parallel_build_inner(NULL, NULL, data + data_pos, o_table_size);
-				data_pos += o_table_size;
+				if (msg->o_table_size)
+				{
+					actual_table_size = 0;
+					expected_table_size = msg->o_table_size;
+					o_table_serialized = palloc0(expected_table_size);
+				}
+
+				memcpy(o_table_serialized + actual_table_size, msg->o_table_serialized, cur_chunk_size);
+				actual_table_size += cur_chunk_size;
+				Assert(actual_table_size <= expected_table_size);
+
+				if (actual_table_size == expected_table_size)
+				{
+					/* participate as a worker in parallel index build */
+					_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
+					pfree(o_table_serialized);
+				}
+
+				data_pos += data_size;
 			}
 			else if (recovery_header->type & RECOVERY_COMMIT)
 			{
