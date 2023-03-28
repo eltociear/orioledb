@@ -793,6 +793,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		/* Store shared build state, for which we reserved space */
 		btshared = (oIdxShared *) shm_toc_allocate(pcxt->toc, estbtshared);
 		btshared->o_table_size = o_table_size;
+		btshared->scantuplesortstates = scantuplesortstates;
 		sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
 
 		memmove(&btshared->o_table_serialized, o_table_serialized, btshared->o_table_size);
@@ -807,6 +808,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		btshared->nrecoveryworkers = *recovery_single_process ? 0 : recovery_pool_size_guc;
 		scantuplesortstates = leaderparticipates ? btshared->nrecoveryworkers + 1 : btshared->nrecoveryworkers;
 		btshared->o_table_size = o_table_size;
+		btshared->scantuplesortstates = scantuplesortstates;
 		sharedsort = recovery_sharedsort;
 
 		if (btshared->nrecoveryworkers != 0)
@@ -818,7 +820,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* Initialize immutable state */
 	btshared->isunique = btspool->isunique;
 	btshared->isconcurrent = isconcurrent;
-	btshared->scantuplesortstates = scantuplesortstates;
 	btshared->ix_num = buildstate->ix_num;
 	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->worker_heap_sort_fn = buildstate->worker_heap_sort_fn;
