@@ -325,6 +325,9 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 	int16		indnkeyatts;
 	OBTOptions *options;
 
+	if (!OidIsValid(indoid))
+		return;
+
 	index_rel = index_open(indoid, AccessShareLock);
 	if (context)
 		reuse = OidIsValid(context->oldNode);
