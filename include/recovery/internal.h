@@ -56,7 +56,7 @@ extern uint64 recovery_queue_data_size;
 #define RECOVERY_ROLLBACK_TO_SAVEPOINT ((uint16) 1 << 12)
 #define RECOVERY_PARALLEL_INDEX_BUILD ((uint16) 1 << 13)
 #define RECOVERY_MODIFY (RECOVERY_INSERT | RECOVERY_DELETE | RECOVERY_UPDATE)
-#define RECOVERY_QUEUE_BUF_SIZE (8 * 1024)
+#define RECOVERY_QUEUE_BUF_SIZE (18 * 1024)
 
 
 typedef struct

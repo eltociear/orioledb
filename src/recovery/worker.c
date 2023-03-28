@@ -361,6 +361,12 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 
 				if (actual_table_size == expected_table_size)
 				{
+//					volatile int b=0;
+//					while(b == 0)
+//						pg_usleep(100000L);
+//
+//					elog(PANIC, "test");
+//
 					/* participate as a worker in parallel index build */
 					_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
 					pfree(o_table_serialized);
