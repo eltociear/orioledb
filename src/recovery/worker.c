@@ -271,9 +271,9 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				data_pos;
 	bool		finished = false;
 	OXid		oxid;
-	Size 		expected_table_size,
+	Size 		expected_table_size = 0,
 				actual_table_size = 0;
-	char	   *o_table_serialized;
+	char	   *o_table_serialized = NULL;
 
 	while (!finished)
 	{
@@ -354,6 +354,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					o_table_serialized = palloc0(expected_table_size);
 				}
 
+				Assert(expected_table_size > 0 && o_table_serialized != NULL);
 				memcpy(o_table_serialized + actual_table_size, msg->o_table_serialized, cur_chunk_size);
 				actual_table_size += cur_chunk_size;
 				Assert(actual_table_size <= expected_table_size);
