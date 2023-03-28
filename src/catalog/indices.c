@@ -664,7 +664,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 						cur_size,
 						cur_chunk_size;
 	int 				i,
-						nchunks;
+						nchunks = 0;
 
 	Assert(!(*recovery_single_process));
 	cur_chunk = palloc(Min(sizeof(RecoveryMsgHeader) + o_table_size, RECOVERY_QUEUE_BUF_SIZE));
