@@ -685,7 +685,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 		sent_size += cur_size;
 		nchunks++;
 	}
-	elog(WARNING, "%lu bytes of o_table sent to all recovery workers in %d chunks", sent_size, nchunks);
+//	elog(WARNING, "%lu bytes of o_table sent to all recovery workers in %d chunks", sent_size, nchunks);
 
 	pfree(cur_chunk);
 }
