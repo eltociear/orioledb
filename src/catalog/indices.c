@@ -660,29 +660,29 @@ static void
 workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 {
 	RecoveryMsgIdxBuild *cur_chunk;
-	uint64				sent_size = 0,
-						cur_size,
-						cur_chunk_size;
+	uint64				sent_net_size = 0,
+						cur_net_size,
+						cur_chunk_size,
+						header_size = offsetof(RecoveryMsgIdxBuild, o_table_serialized);
 	int 				i,
 						nchunks = 0;
 
 	Assert(!(*recovery_single_process));
-	cur_chunk = palloc(Min(sizeof(RecoveryMsgHeader) + o_table_size, RECOVERY_QUEUE_BUF_SIZE));
+	cur_chunk = palloc(Min(header_size + o_table_size, RECOVERY_QUEUE_BUF_SIZE));
 
-	while (sent_size < o_table_size)
+	while (sent_net_size < o_table_size)
 	{
-		cur_size = Min(o_table_size - sent_size,
-					RECOVERY_QUEUE_BUF_SIZE - offsetof(RecoveryMsgIdxBuild, o_table_serialized));
-		cur_chunk_size = offsetof(RecoveryMsgIdxBuild, o_table_serialized) + cur_size;
+		cur_net_size = Min(o_table_size - sent_net_size, RECOVERY_QUEUE_BUF_SIZE - header_size);
+		cur_chunk_size = header_size + cur_net_size;
 		cur_chunk->header.type = RECOVERY_PARALLEL_INDEX_BUILD;
-		cur_chunk->o_table_size = (sent_size == 0) ? o_table_size : 0;
-		memcpy(&cur_chunk->o_table_serialized, o_table_serialized + sent_size, cur_size);
+		cur_chunk->o_table_size = (sent_net_size == 0) ? o_table_size : 0;
+		memcpy(&cur_chunk->o_table_serialized, o_table_serialized + sent_net_size, cur_net_size);
 		for (i = 0; i < recovery_pool_size_guc; i++)
 		{
 			worker_send_msg(i, (Pointer) cur_chunk, cur_chunk_size);
 			worker_queue_flush(i);
 		}
-		sent_size += cur_size;
+		sent_net_size += cur_net_size;
 		nchunks++;
 	}
 //	elog(WARNING, "%lu bytes of o_table sent to all recovery workers in %d chunks", sent_size, nchunks);
