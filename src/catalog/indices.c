@@ -804,7 +804,14 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		 * and doesn't occupy space in btshared
 		 */
 		btshared = recovery_oidxshared;
+#if PG_VERSION_NUM >= 140000
 		btshared->nrecoveryworkers = *recovery_single_process ? 0 : recovery_pool_size_guc;
+#else
+		/* In PG13 parallel index build in recovery is disabled due to tuplesort_initialize_shared()
+		 * can not work with NULL seg. This is corrected by 808e13b282ef since PG14.
+		 */
+		btshared->nrecoveryworkers = 0;
+#endif
 		scantuplesortstates = leaderparticipates ? btshared->nrecoveryworkers + 1 : btshared->nrecoveryworkers;
 		btshared->o_table_size = o_table_size;
 		sharedsort = recovery_sharedsort;
