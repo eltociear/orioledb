@@ -59,8 +59,6 @@
 /* Magic numbers for parallel state sharing */
 #define PARALLEL_KEY_BTREE_SHARED		UINT64CONST(0xA000000000000001)
 #define PARALLEL_KEY_TUPLESORT			UINT64CONST(0xA000000000000002)
-#define PARALLEL_KEY_TUPLESORT_SPOOL2	UINT64CONST(0xA000000000000003)
-#define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
 #define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xA000000000000005)
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xA000000000000006)
 
@@ -69,15 +67,6 @@
  * parallel index builds.  This may be useful as a debugging aid.
 #undef DISABLE_LEADER_PARTICIPATION
  */
-
-/*
- * Return pointer to a oIdxShared's parallel table scan.
- *
- * c.f. shm_toc_allocate as to why BUFFERALIGN is used, rather than just
- * MAXALIGN.
- */
-#define ParallelTableScanFromoIdxShared(shared) \
-	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(oIdxShared)))
 
 /*
  * Status for leader participation in parallel index build.
