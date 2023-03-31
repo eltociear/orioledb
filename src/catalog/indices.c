@@ -700,15 +700,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	bool		leaderparticipates = true;
 	int 		o_table_size;
 	Pointer 	o_table_serialized;
-
 #ifdef DISABLE_LEADER_PARTICIPATION
 	leaderparticipates = false;
 #endif
-	bool 		in_recovery = is_recovery_in_progress();
 
 	o_table_serialized = serialize_o_table(btspool->o_table, &o_table_size);
 
-	if (!in_recovery)
+	if (!is_recovery_in_progress())
 	{
 		/*
 		 * Enter parallel mode, and create context for parallel build of btree
@@ -718,8 +716,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		Assert(request > 0);
 		pcxt = CreateParallelContext("orioledb", "_o_index_parallel_build_main",
 								 request);
-
-
 		scantuplesortstates = leaderparticipates ? request + 1 : request;
 		/*
 		 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
@@ -731,7 +727,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		estsort = tuplesort_estimate_shared(scantuplesortstates);
 		shm_toc_estimate_chunk(&pcxt->estimator, estsort);
 		shm_toc_estimate_keys(&pcxt->estimator, 2);
-
 		/*
 		 * Estimate space for WalUsage and BufferUsage -- PARALLEL_KEY_WAL_USAGE
 		 * and PARALLEL_KEY_BUFFER_USAGE.
@@ -746,7 +741,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		shm_toc_estimate_chunk(&pcxt->estimator,
 							   mul_size(sizeof(BufferUsage), pcxt->nworkers));
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
-
 		/* Everyone's had a chance to ask for space, so now create the DSM */
 		InitializeParallelDSM(pcxt);
 
@@ -802,7 +796,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	memset(btshared->indtuples, 0, INDEX_MAX_KEYS * sizeof(double));
 	orioledb_parallelscan_initialize_inner((ParallelTableScanDesc) &(btshared->poscan));
 
-	if(!in_recovery)
+	if(!is_recovery_in_progress())
 	{
 		/*
 		 * Store shared tuplesort-private state, for which we reserved space.
@@ -853,7 +847,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btleader->bufferusage = bufferusage;
 
 	/* If no workers were successfully launched, back out (do serial build) */
-	if (!in_recovery)
+	if (!is_recovery_in_progress())
 	{
 		if (btleader->nparticipanttuplesorts == 0)
 		{
@@ -875,12 +869,11 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	if (leaderparticipates)
 		_o_index_leader_participate_as_worker(buildstate);
 
-	Assert(in_recovery == is_recovery_in_progress());
 	/*
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
 	 */
-	if(!in_recovery)
+	if(!is_recovery_in_progress())
 		WaitForParallelWorkersToAttach(pcxt);
 	else
 	{
@@ -1030,6 +1023,11 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 
 	if(!is_recovery_in_progress())
 	{
+		/*
+		 * btshared and sharedsort are allocated in DSM shared state.
+		 * btshared is allocated to contain serialized o_table
+		 */
+
 		Assert(recovery_o_table_size == 0 && recovery_o_table_serialized == NULL);
 		/* Look up nbtree shared state */
 		btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
@@ -1040,13 +1038,19 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 	}
 	else
 	{
+		/*
+		 * In recovery btshared and sharedsort are allocated in recovery workers shmem pool.
+		 * btshared is of fixed size and don't accommodate serialized o_table which is transferred
+		 * via recovery message queue instead.
+		 */
+
 		Assert(seg == NULL && toc == NULL);
-		/* Sharedsort and btshared are allocated in recovery workers shmem pool */
 		btshared = recovery_oidxshared;
+		/* Size transferred through recovery message is the same one as stored in shared state */
+		Assert(recovery_o_table_size == btshared->o_table_size);
+		btspool->o_table = deserialize_o_table((Pointer) recovery_o_table_serialized, recovery_o_table_size);
+
 		sharedsort = recovery_sharedsort;
-		/* btshared in recovery is fixed size and doesn't contain o_table_serialized */
-		btspool->o_table = deserialize_o_table((Pointer) recovery_o_table_serialized,
-												recovery_o_table_size);
 	}
 
 	btspool->isunique = btshared->isunique;
