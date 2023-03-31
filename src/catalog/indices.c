@@ -121,12 +121,13 @@ typedef struct oIdxBuildState
 	Relation	heap;
 	oIdxSpool    *spool;
 	double		reltuples;
-	oIdxLeader   *btleader;
 
 	/* Oriole-specific */
-	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
+	oIdxLeader   *btleader;
+	void        (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
 	OIndexNumber   	ix_num;
 } oIdxBuildState;
+
 static void _o_index_end_parallel(oIdxLeader *btleader);
 static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
 static void build_secondary_index_worker_sort(oIdxSpool *btspool, void *btshared,
@@ -679,9 +680,9 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 }
 
 /*
- * Create parallel context, and launch workers for leader. For recovery
- * mode signal the existing Orioledb recovery workers to join as parallel
- * workers.
+ * Invoke workers for leader. For non-recovery create parallel context and launch
+ * parallel workers. For recovery mode signal the existing Orioledb recovery
+ * workers to join as parallel workers.
  *
  * buildstate argument should be initialized (with the exception of the
  * tuplesort state in spools, which may later be created based on shared
@@ -690,7 +691,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
  * request is the target number of parallel worker processes to launch.
  *
  * Sets buildstate's oIdxLeader, which caller must use to shut down parallel
- * mode by passing it to _bt_end_parallel() at the very end of its index
+ * mode by passing it to _o_index_end_parallel() at the very end of its index
  * build.  If not even a single worker process can be launched, this is
  * never set, and caller should proceed with a serial index build.
  */
@@ -924,7 +925,6 @@ _o_index_end_parallel(oIdxLeader *btleader)
 	ExitParallelMode();
 }
 
-/* Private analogue of _bt_parallel_estimate_shared */
 /*
  * Returns size of shared memory required to store state for a parallel
  * OrioleDB index build based on the snapshot its parallel scan will use.
@@ -939,17 +939,13 @@ _o_index_parallel_estimate_shared(Size o_table_size)
 	return size;
 }
 
-/* Private copy of _bt_parallel_heap_scan
- * Within leader, wait for end of heap scan.
+/*
+ * Within leader, wait for end of workers heap scans and sorts.
  *
- * When called, parallel heap scan started by _bt_begin_parallel() will
+ * When called, parallel heap scan started by _o_index_begin_parallel() will
  * already be underway within worker processes (when leader participates
  * as a worker, we should end up here just as workers are finishing).
  *
- * Fills in fields needed for ambuild statistics, and lets caller set
- * field indicating that some worker encountered a broken HOT chain.
- *
- * Returns the total number of heap tuples scanned.
  */
 static void
 _o_index_parallel_heapscan(oIdxBuildState *buildstate)
@@ -977,8 +973,6 @@ _o_index_parallel_heapscan(oIdxBuildState *buildstate)
 	return;
 }
 
-/* Private variant of _bt_leader_participate_as_worker
- */
 static void
 _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 {
@@ -1014,7 +1008,7 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
 }
 
 /*
- * Perform work within a launched parallel process when not in recovery.
+ * Wrapper to be called from parallel context when not in recovery.
  */
 void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
@@ -1022,7 +1016,7 @@ void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 }
 
 /*
- * Private analogue of _bt_parallel_build_main.
+ * Perform work within a launched parallel process.
  * For recovery attaches to recovery shared memory and gets
  * serialized o_table as an explicit argument.
  */
@@ -1102,16 +1096,13 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 }
 
 /*
- * Private analohue of _bt_parallel_scan_and_sort()
- * Perform a worker's portion of a parallel sort.
+ * Perform a worker's portion of a parallel sort for secondary index build
  *
  * This generates a tuplesort for passed btspool.  All
  * other spool fields should already be set when this is called.
  *
  * sortmem is the amount of working memory to use within each worker,
  * expressed in KBs.
- *
- * When this returns, workers are done, and need only release resources.
  */
 static void
 build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsort *sharedsort,
@@ -1174,6 +1165,7 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	pfree(btspool->sortstates);
 }
 
+/* Get next tuple and store all its attributes to a slot */
 static inline
 bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
 							   TupleTableSlot *slot, double *ntuples)
@@ -1196,8 +1188,8 @@ bool scan_getnextslot_allattrs(BTreeSeqScan *scan, OTableDescr *descr,
 }
 
 /*
- * Make local heapscan (in a worker, in a leader, or sequentially)
- * Put result into provided sortstate
+ * Make a local heapscan in a worker, in a leader, or sequentially
+ * for building secomndary index. Put result into provided sortstate
  */
 static void
 build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, ParallelOScanDesc poscan, Tuplesortstate **sortstates, bool progress, double *heap_tuples, double *index_tuples[])
