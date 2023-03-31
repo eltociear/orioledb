@@ -84,7 +84,6 @@ typedef struct
 	char			  o_table_serialized[FLEXIBLE_ARRAY_MEMBER];
 } RecoveryMsgIdxBuild;
 
-
 typedef struct
 {
 	RecoveryMsgHeader header;

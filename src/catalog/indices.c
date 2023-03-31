@@ -80,9 +80,9 @@
 	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(oIdxShared)))
 
 /*
- * Status for leader in parallel index build.
- * NB: It is inherited from bt_leader as separate entity, but could be made a part
- * of oIdxBuildState which is also used only on leader.
+ * Status for leader participation in parallel index build.
+ * It is inherited from bt_leader unmodified, not joined with oIdxBuildState which
+ * is also used only on leader to preserve similarity with parallel btree build code.
  */
 typedef struct oIdxLeader
 {
@@ -103,9 +103,6 @@ typedef struct oIdxLeader
 	 *
 	 * btshared is the shared state for entire build.  sharedsort is the
 	 * shared, tuplesort-managed state passed to each process tuplesort.
-	 * sharedsort2 is the corresponding btspool2 shared state, used only when
-	 * building unique indexes.  snapshot is the snapshot used by the scan iff
-	 * an MVCC snapshot is required.
 	 */
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
@@ -114,9 +111,9 @@ typedef struct oIdxLeader
 } oIdxLeader;
 
 /*
- * Working state for parallel build only used only for leader. It is used
- * to store everything needed for workers into shmem or recovery_shmem and
- * for leaderworker that also participated scan by default.
+ * Working state for parallel build used only for leader. It is used
+ * to fill oIdxShared for workers in shmem or recovery_shmem and
+ * a oIdxLeader for leader participation in parallel scan.
  */
 typedef struct oIdxBuildState
 {
@@ -124,12 +121,6 @@ typedef struct oIdxBuildState
 	Relation	heap;
 	oIdxSpool    *spool;
 	double		reltuples;
-
-	/*
-	 * btleader is only present when a parallel index build is performed, and
-	 * only in the leader process. (Actually, only the leader has a
-	 * oIdxBuildState.  Workers have their own spool and spool2, though.)
-	 */
 	oIdxLeader   *btleader;
 
 	/* Oriole-specific */
@@ -655,7 +646,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 		LWLockRelease(&checkpoint_state->oTablesAddLock);
 }
 
-/* Send o_table to recovery workers */
+/* Send o_table to all recovery workers */
 static void
 workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 {
@@ -685,27 +676,18 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 		sent_net_size += cur_net_size;
 		nchunks++;
 	}
-//	elog(WARNING, "%lu bytes of o_table sent to all recovery workers in %d chunks", sent_size, nchunks);
 
 	pfree(cur_chunk);
 }
 
 /*
- * Private copy of _bt_begin_parallel.
- * - calls orioledb-specific sort routines
- * (called by _bt_leader_participate_as_worker->_bt_parallel_scan_and_sort -> tuplesort_begin_index_btree)
- * - sharedsort2, spool2 allocations removed
- * - call workers starting at _o_index_parallel_build_main
- * - call _o_index_parallel_estimate_shared just because it's static in PG
- */
-/*
- * Create parallel context, and launch workers for leader.
+ * Create parallel context, and launch workers for leader. For recovery
+ * mode signal the existing Orioledb recovery workers to join as parallel
+ * workers.
  *
  * buildstate argument should be initialized (with the exception of the
  * tuplesort state in spools, which may later be created based on shared
  * state initially set up here).
- *
- * isconcurrent indicates if operation is CREATE INDEX CONCURRENTLY.
  *
  * request is the target number of parallel worker processes to launch.
  *
@@ -760,7 +742,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		shm_toc_estimate_chunk(&pcxt->estimator, estbtshared);
 		estsort = tuplesort_estimate_shared(scantuplesortstates);
 		shm_toc_estimate_chunk(&pcxt->estimator, estsort);
-
 		shm_toc_estimate_keys(&pcxt->estimator, 2);
 
 		/*
@@ -877,7 +858,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 
 		pfree(o_table_serialized);
 
-		elog(WARNING, "Parallel index build uses %d recovery workers", btshared->nrecoveryworkers);
+		elog(DEBUG4, "Parallel index build uses %d recovery workers", btshared->nrecoveryworkers);
 	}
 
 	btleader->btshared = btshared;
@@ -917,7 +898,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		WaitForParallelWorkersToAttach(pcxt);
 	else
 	{
-	//	elog(PANIC, "test");
 		while(btshared->nrecoveryworkersjoined < btshared->nrecoveryworkers)
 		{
 			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -947,11 +927,10 @@ _o_index_end_parallel(oIdxLeader *btleader)
 	ExitParallelMode();
 }
 
-/* Private copy of _bt_parallel_estimate_shared because is is static
- * and oriole index build shared state differ in size*/
+/* Private analogue of _bt_parallel_estimate_shared */
 /*
  * Returns size of shared memory required to store state for a parallel
- * btree index build based on the snapshot its parallel scan will use.
+ * OrioleDB index build based on the snapshot its parallel scan will use.
  */
 Size
 _o_index_parallel_estimate_shared(Size o_table_size)
@@ -963,9 +942,7 @@ _o_index_parallel_estimate_shared(Size o_table_size)
 	return size;
 }
 
-/* Private copy just because _bt_parallel_heap_scan is static */
-/* TODO Determine that orioledb scan is finished (instead of bt_scan) */
-/*
+/* Private copy of _bt_parallel_heap_scan
  * Within leader, wait for end of heap scan.
  *
  * When called, parallel heap scan started by _bt_begin_parallel() will
@@ -1003,9 +980,7 @@ _o_index_parallel_heapscan(oIdxBuildState *buildstate)
 	return;
 }
 
-/* Private copy of _bt_leader_participate_as_worker which is static in PG.
- * - Calls o_index_parallel_scan_and_sort instead of _bt_parallel_scan_and_sort
- * - sharedsort2, spool2 removed
+/* Private variant of _bt_leader_participate_as_worker
  */
 static void
 _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
@@ -1050,7 +1025,7 @@ void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 }
 
 /*
- * Private copy of _bt_parallel_build_main.
+ * Private analogue of _bt_parallel_build_main.
  * For recovery attaches to recovery shared memory and gets
  * serialized o_table as an explicit argument.
  */
@@ -1059,7 +1034,6 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 							char *recovery_o_table_serialized,
 							Size recovery_o_table_size)
 {
-//	char	   *sharedquery;
 	oIdxSpool    *btspool;
 	oIdxShared   *btshared;
 	Sharedsort *sharedsort;
@@ -1072,21 +1046,7 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 		ResetUsage();
 #endif							/* BTREE_BUILD_STATS */
 
-	/*
-	 * The only possible status flag that can be set to the parallel worker is
-	 * PROC_IN_SAFE_IC.
-	 */
-//	Assert((MyProc->statusFlags == 0) ||
-//		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
-
-//	/* Set debug_query_string for individual workers first */
-//	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
-//	debug_query_string = sharedquery;
-
-//	/* Report the query string from leader */
-//	pgstat_report_activity(STATE_RUNNING, debug_query_string);
-
-	/* Initialize wore /er's own spool */
+	/* Initialize worker's own spool */
 	btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 
 	if(!is_recovery_in_progress())
@@ -1145,10 +1105,7 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 }
 
 /*
- * Private copy of _bt_parallel_scan_and_sort which is static in PG
- * - calls orioledb-specific sort routine (tuplesort_begin_orioledb_index)
- * (called by _bt_leader_participate_as_worker->_bt_parallel_scan_and_sort -> tuplesort_begin_index_btree)
- * - removed sharedsort2, spool2 from signature and from assignment in oIdxBuildState
+ * Private analohue of _bt_parallel_scan_and_sort()
  * Perform a worker's portion of a parallel sort.
  *
  * This generates a tuplesort for passed btspool.  All
