@@ -806,7 +806,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	/* Initialize mutable state */
 	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
 	ConditionVariableInit(&btshared->workersdonecv);
-	SpinLockInit(&btshared->workersjoin_mutex);
 	SpinLockInit(&btshared->mutex);
 	btshared->nrecoveryworkersjoined = 0;
 	btshared->nparticipantsdone = 0;
@@ -1127,9 +1126,9 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	idx = btspool->descr->indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
 
 	/* Track recovery workers joined parallel operation */
-	SpinLockAcquire(&btshared->workersjoin_mutex);
+	SpinLockAcquire(&btshared->mutex);
 	btshared->nrecoveryworkersjoined++;
-	SpinLockRelease(&btshared->workersjoin_mutex);
+	SpinLockRelease(&btshared->mutex);
 	ConditionVariableSignal(&btshared->recoveryworkersjoinedcv);
 
 	/* Begin "partial" tuplesort */

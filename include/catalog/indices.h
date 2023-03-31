@@ -26,9 +26,7 @@ typedef struct ODefineIndexContext
 } ODefineIndexContext;
 
 /*
- * Status record for spooling/sorting phase.  (Note we may have two of
- * these due to the special requirements for uniqueness-checking with
- * dead tuples.)
+ * Status record for spooling/sorting phase.
  */
 typedef struct oIdxSpool
 {
@@ -41,9 +39,10 @@ typedef struct oIdxSpool
 } oIdxSpool;
 
 /*
- * Status for index builds performed in parallel.  This is allocated in a
- * dynamic shared memory segment.  Note that there is a separate tuplesort TOC
- * entry, private to tuplesort.c but allocated by this module on its behalf.
+ * Status for index builds performed in parallel. This is allocated in a
+ * dynamic shared memory segment or recovery workers shared memory pool.
+ * Note that there is a separate tuplesort TOC entry, private to tuplesort.c
+ * but allocated by this module on its behalf.
  */
 typedef struct oIdxShared
 {
@@ -74,7 +73,6 @@ typedef struct oIdxShared
 	 * builds that must work just the same when an index is built in parallel.
 	 */
 	slock_t		mutex;
-	slock_t 	workersjoin_mutex;
 
 	/*
 	 * Mutable state that is maintained by workers, and reported back to
