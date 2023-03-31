@@ -125,8 +125,6 @@ typedef struct oIdxBuildState
 
 	/* Oriole-specific */
 	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
-	void       (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate **,
-					bool, double *, double **);
 	OIndexNumber   	ix_num;
 } oIdxBuildState;
 static void _o_index_end_parallel(oIdxLeader *btleader);
@@ -134,6 +132,8 @@ static void _o_index_leader_participate_as_worker(oIdxBuildState *buildstate);
 static void build_secondary_index_worker_sort(oIdxSpool *btspool, void *btshared,
 											Sharedsort *sharedsort, int sortmem,
 											bool progress);
+static void build_secondary_index_worker_heap_scan(OTableDescr *descr, OIndexDescr *idx, ParallelOScanDesc poscan, Tuplesortstate **sortstates, bool progress, double *heap_tuples, double *index_tuples[]);
+
 
 /* copied from tablecmds.c */
 typedef struct NewColumnValue
@@ -655,8 +655,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 						cur_net_size,
 						cur_chunk_size,
 						header_size = offsetof(RecoveryMsgIdxBuild, o_table_serialized);
-	int 				i,
-						nchunks = 0;
+	int 				i;
 
 	Assert(!(*recovery_single_process));
 	cur_chunk = palloc(Min(header_size + o_table_size, RECOVERY_QUEUE_BUF_SIZE));
@@ -674,7 +673,6 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size)
 			worker_queue_flush(i);
 		}
 		sent_net_size += cur_net_size;
-		nchunks++;
 	}
 
 	pfree(cur_chunk);
@@ -803,7 +801,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->isconcurrent = isconcurrent;
 	btshared->ix_num = buildstate->ix_num;
 	btshared->scantuplesortstates = scantuplesortstates;
-	btshared->worker_heap_scan_fn = buildstate->worker_heap_scan_fn;
 	btshared->worker_heap_sort_fn = buildstate->worker_heap_sort_fn;
 	/* Initialize mutable state */
 	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
@@ -1148,11 +1145,7 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	btspool->sortstates = palloc0(sizeof(Tuplesortstate));
 	btspool->sortstates[0] = tuplesort_begin_orioledb_index(idx, work_mem, false, coordinate);
 
-	/*
-	 * Call build_secondary_index_worker_heap_scan() or
-	 * rebuild_index_worker_heap_scan();
-	 */
-	btshared->worker_heap_scan_fn(btspool->descr, idx, poscan, btspool->sortstates, progress, &heaptuples, &indtuples);
+	build_secondary_index_worker_heap_scan(btspool->descr, idx, poscan, btspool->sortstates, progress, &heaptuples, &indtuples);
 
 	/* Execute this worker's part of the sort */
 	if (progress)
@@ -1275,7 +1268,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num)
 		btspool->o_table = o_table;
 		btspool->descr = descr;
 
-		buildstate.worker_heap_scan_fn = &build_secondary_index_worker_heap_scan;
 		buildstate.worker_heap_sort_fn = &build_secondary_index_worker_sort;
 		buildstate.ix_num = ix_num;
 		buildstate.spool = btspool;

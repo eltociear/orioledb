@@ -94,8 +94,6 @@ typedef struct oIdxShared
 
 	/* Oriole-specific */
 	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
-	void       (*worker_heap_scan_fn) (OTableDescr *, OIndexDescr *, ParallelOScanDesc, Tuplesortstate **,
-					bool, double *, double **);
 	ParallelOScanDescData poscan;
 	OIndexNumber   ix_num;
 	Size 		   o_table_size;
