@@ -211,6 +211,25 @@ o_tbl_insert(OTableDescr *descr, Relation relation,
 	return slot;
 }
 
+static inline RowLockMode
+LockTupleMode_to_RowLockMode(LockTupleMode mode)
+{
+	switch (mode)
+	{
+		case LockTupleKeyShare:
+			return RowLockKeyShare;
+		case LockTupleShare:
+			return RowLockShare;
+		case LockTupleNoKeyExclusive:
+			return RowLockNoKeyUpdate;
+		case LockTupleExclusive:
+			return RowLockUpdate;
+		default:
+			elog(ERROR, "Unknown lock mode: %u", mode);
+			break;
+	}
+}
+
 OBTreeModifyResult
 o_tbl_lock(OTableDescr *descr, OBTreeKeyBound *pkey, LockTupleMode mode,
 		   OXid oxid, OLockCallbackArg *larg, BTreeLocationHint *hint)
@@ -228,24 +247,7 @@ o_tbl_lock(OTableDescr *descr, OBTreeKeyBound *pkey, LockTupleMode mode,
 
 	o_btree_load_shmem(&GET_PRIMARY(descr)->desc);
 
-	switch (mode)
-	{
-		case LockTupleKeyShare:
-			lock_mode = RowLockKeyShare;
-			break;
-		case LockTupleShare:
-			lock_mode = RowLockShare;
-			break;
-		case LockTupleNoKeyExclusive:
-			lock_mode = RowLockNoKeyUpdate;
-			break;
-		case LockTupleExclusive:
-			lock_mode = RowLockUpdate;
-			break;
-		default:
-			elog(ERROR, "Unknown lock mode: %u", mode);
-			break;
-	}
+	lock_mode = LockTupleMode_to_RowLockMode(mode);
 
 	O_TUPLE_SET_NULL(nullTup);
 	res = o_btree_modify(&GET_PRIMARY(descr)->desc, BTreeOperationLock,
@@ -453,8 +455,15 @@ o_tbl_insert_on_conflict(ModifyTableState *mstate,
 			marg.changingPart = false;
 			marg.newSlot = (OTableSlot *) confl_slot;
 			if (!marg.keyAttrs)
-				marg.keyAttrs = RelationGetIndexAttrBitmap(rinfo->ri_RelationDesc,
-														   INDEX_ATTR_BITMAP_KEY);
+			{
+				LockTupleMode mode;
+				marg.keyAttrs =
+					RelationGetIndexAttrBitmap(rinfo->ri_RelationDesc,
+											   INDEX_ATTR_BITMAP_KEY);
+				mode = ExecUpdateLockMode(estate, rinfo);
+				marg.lock_mode = LockTupleMode_to_RowLockMode(mode);
+				marg.is_ioc = true;
+			}
 
 			o_check_constraints(rinfo, confl_slot, estate);
 
@@ -799,7 +808,7 @@ o_tbl_indices_overwrite(OTableDescr *descr,
 	modify_result = o_btree_modify(&GET_PRIMARY(descr)->desc, BTreeOperationUpdate,
 								   newTup, BTreeKeyLeafTuple,
 								   (Pointer) oldPkey, BTreeKeyBound,
-								   oxid, csn, RowLockNoKeyUpdate,
+								   oxid, csn, arg->lock_mode,
 								   hint, &callbackInfo);
 
 	if (modify_result == OBTreeModifyResultLocked)
@@ -1500,10 +1509,14 @@ o_update_callback(BTreeDescr *descr,
 		copy_tuple_to_slot(tup, o_arg->scanSlot, o_arg->descr, o_arg->csn,
 						   PrimaryIndexNumber, hint);
 
-		if (tts_orioledb_modified(o_arg->scanSlot, &o_arg->newSlot->base, o_arg->keyAttrs))
-			*lock_mode = RowLockUpdate;
-		else
-			*lock_mode = RowLockNoKeyUpdate;
+		if (!o_arg->is_ioc)
+		{
+			if (tts_orioledb_modified(o_arg->scanSlot, &o_arg->newSlot->base,
+									  o_arg->keyAttrs))
+				*lock_mode = RowLockUpdate;
+			else
+				*lock_mode = RowLockNoKeyUpdate;
+		}
 
 		if (!modified)
 		{
@@ -1524,10 +1537,14 @@ o_update_callback(BTreeDescr *descr,
 	copy_tuple_to_slot(tup, inputslot, o_arg->descr, o_arg->csn,
 					   PrimaryIndexNumber, hint);
 
-	if (tts_orioledb_modified(inputslot, &o_arg->newSlot->base, o_arg->keyAttrs))
-		*lock_mode = RowLockUpdate;
-	else
-		*lock_mode = RowLockNoKeyUpdate;
+	if (!o_arg->is_ioc)
+	{
+		if (tts_orioledb_modified(inputslot, &o_arg->newSlot->base,
+								  o_arg->keyAttrs))
+			*lock_mode = RowLockUpdate;
+		else
+			*lock_mode = RowLockNoKeyUpdate;
+	}
 
 	return OBTreeCallbackActionLock;
 }

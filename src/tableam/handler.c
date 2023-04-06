@@ -454,6 +454,8 @@ orioledb_tuple_delete(ModifyTableState *mstate,
 	marg.scanSlot = returningSlot ? returningSlot : descr->oldTuple;
 	marg.changingPart = changingPart;
 	marg.keyAttrs = NULL;
+	marg.lock_mode = RowLockUpdate;
+	marg.is_ioc = false;
 
 	get_keys_from_rowid(GET_PRIMARY(descr), tupleid, &pkey, &hint, NULL, NULL);
 
@@ -553,6 +555,8 @@ orioledb_tuple_update(ModifyTableState *mstate, ResultRelInfo *rinfo,
 	marg.newSlot = (OTableSlot *) slot;
 	marg.keyAttrs = RelationGetIndexAttrBitmap(rinfo->ri_RelationDesc,
 											   INDEX_ATTR_BITMAP_KEY);
+	marg.lock_mode = RowLockNoKeyUpdate;
+	marg.is_ioc = false;
 
 	mres = o_tbl_update(descr, slot, estate, &old_pkey, rel,
 						oxid, snapshot->snapshotcsn, &hint, &marg);

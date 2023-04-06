@@ -54,18 +54,20 @@ typedef struct
 
 typedef struct
 {
-	TupleTableSlot *scanSlot;
-	ResultRelInfo *rinfo;
-	OTableDescr *descr;
-	EPQState   *epqstate;
-	OTableSlot *newSlot;
-	OXid		oxid;
-	CommitSeqNo csn;
-	UndoLocation tup_undo_location;
-	bool		deleted;
-	bool		modified;
-	bool		changingPart;
-	Bitmapset  *keyAttrs;
+	TupleTableSlot	   *scanSlot;
+	ResultRelInfo	   *rinfo;
+	OTableDescr		   *descr;
+	EPQState		   *epqstate;
+	OTableSlot		   *newSlot;
+	OXid				oxid;
+	CommitSeqNo			csn;
+	UndoLocation		tup_undo_location;
+	bool				deleted;
+	bool				modified;
+	bool				changingPart;
+	Bitmapset		   *keyAttrs;
+	RowLockMode			lock_mode;
+	bool				is_ioc;
 } OModifyCallbackArg;
 
 typedef struct
