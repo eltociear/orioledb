@@ -236,7 +236,6 @@ OXid		recovery_xmin = InvalidOXid;
 pg_atomic_uint32 *worker_finish_count;
 pg_atomic_uint32 *worker_ptrs_changes;
 RecoveryWorkerPtrs *worker_ptrs;
-RecoveryWorkerPtrs *idx_worker_ptrs;
 pg_atomic_uint64 *recovery_ptr;
 pg_atomic_uint64 *recovery_main_retain_ptr;
 pg_atomic_uint64 *recovery_finished_list_ptr;

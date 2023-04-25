@@ -646,7 +646,7 @@ workers_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_
 						cur_chunk_size,
 						header_size = offsetof(RecoveryMsgIdxBuild, o_table_serialized);
 	int 				i;
-	int 				index_build_leader = recovery_idx_pool_size_guc + recovery_pool_size_guc;
+	int 				index_build_leader = recovery_idx_pool_size_guc + recovery_pool_size_guc - 1;
 	int					index_build_first_worker = recovery_pool_size_guc;
 
 	Assert(!(*recovery_single_process));
