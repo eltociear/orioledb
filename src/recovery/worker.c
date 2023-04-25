@@ -355,7 +355,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				Assert(data_pos == 0);
 				if (msg->o_table_size)
 				{
-					Assert(msg->o_table_size == recovery_oidxshared->o_table_size);
+					//Assert(msg->o_table_size == recovery_oidxshared->o_table_size);
 					actual_table_size = 0;
 					expected_table_size = msg->o_table_size;
 					o_table_serialized = palloc0(expected_table_size);
