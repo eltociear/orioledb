@@ -36,7 +36,10 @@
 #include "utils/inval.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
+
+#if PG_VERSION_NUM >= 140000
 #include "utils/wait_event.h"
+#endif
 
 #define QUEUE_READ_USLEEP_BASE		(10)
 #define QUEUE_READ_USLEEP_MULTIPLER	(2)
@@ -371,7 +374,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					if (recovery_header->type & RECOVERY_WORKER_PARALLEL_INDEX_BUILD)
 					{
 						Assert(recovery_idx_pool_size_guc <= id &&
-								id < recovery_idx_pool_size_guc + recovery_pool_size_guc);
+								id < recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
 						/* participate as a worker in parallel index build */
 						_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
 					}
@@ -380,7 +383,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						OTable 		*o_table;
 						OTableDescr *descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
 
-						Assert(id == recovery_idx_pool_size_guc + recovery_pool_size_guc);
+						Assert(id == recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
 						/*
 						 * start a parallel index build in a dedicated pool of recovery
 						 * workers and become their leader
