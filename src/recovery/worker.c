@@ -350,6 +350,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				}
 				data_pos += tuple_len;
 			}
+#if PG_VERSION_NUM >= 140000
 			else if (recovery_header->type & (RECOVERY_LEADER_PARALLEL_INDEX_BUILD | RECOVERY_WORKER_PARALLEL_INDEX_BUILD ))
 			{
 				RecoveryMsgIdxBuild 	*msg = (RecoveryMsgIdxBuild *) (data + data_pos);
@@ -402,6 +403,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 
 				data_pos += data_size;
 			}
+#endif
 			else if (recovery_header->type & RECOVERY_COMMIT)
 			{
 				oxid_csn_record = (RecoveryMsgOXidPtr *) (data + data_pos);
