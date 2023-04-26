@@ -434,6 +434,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			}
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
+				ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 				finished = true;
 				break;
 			}
