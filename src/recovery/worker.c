@@ -338,12 +338,13 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					Assert(ORelOidsIsValid(oids));
 
 					tuple.data = data + data_pos;
-
+#if PG_VERSION_NUM >= 140000
 					/* If index is now being built for a relation, wait until it finished before modifying it */
 					if (ORelOidsIsEqual(oids, recovery_oidxshared->oids))
 					{
 						ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);						
 					}
+#endif
 					apply_modify_record(descr, indexDescr,
 										(recovery_header->type & RECOVERY_MODIFY),
 										tuple, false);
@@ -435,7 +436,9 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			}
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
+#if PG_VERSION_NUM >= 140000
 				ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+#endif
 				finished = true;
 				break;
 			}
