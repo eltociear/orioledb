@@ -342,7 +342,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					/* If index is now being built for a relation, wait until it finished before modifying it */
 					if (ORelOidsIsEqual(oids, recovery_oidxshared->oids))
 					{
-						ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);						
+						ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);						
 					}
 					apply_modify_record(descr, indexDescr,
 										(recovery_header->type & RECOVERY_MODIFY),
@@ -396,7 +396,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						 * Wakeup other recovery workers that may wait to do their modify operations on
 						 * this relation
 						 */
-						ConditionVariableBroadcast(&recovery_oidxshared->recoveryindexbuild);
+						ConditionVariableBroadcast(&recovery_oidxshared->recoveryindexbuild_modify);
+						ConditionVariableSignal(&recovery_oidxshared->recoveryindexbuild_indexbuild);
 					}
 					pfree(o_table_serialized);
 				}
@@ -434,7 +435,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			}
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
-				ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+				ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 				finished = true;
 				break;
 			}
