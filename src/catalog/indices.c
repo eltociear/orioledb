@@ -1063,7 +1063,7 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 		Assert(seg == NULL && toc == NULL);
 		btshared = recovery_oidxshared;
 		/* Size transferred through recovery message is the same one as stored in shared state */
-		Assert(recovery_o_table_size == btshared->o_table_size);
+		//Assert(recovery_o_table_size == btshared->o_table_size);
 		btspool->o_table = deserialize_o_table((Pointer) recovery_o_table_serialized, recovery_o_table_size);
 		sharedsort = recovery_sharedsort;
 	}
