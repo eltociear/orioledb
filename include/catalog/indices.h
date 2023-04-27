@@ -65,6 +65,7 @@ typedef struct oIdxShared
 
 	/* Look for recovery workers joined parallel operation */
 	ConditionVariable recoveryworkersjoinedcv;
+	ConditionVariable recoveryleaderstarted;
 	/* Exclude relation with index being built in recovery from applying recovery modify messages
 	 * concurrently */
 	ConditionVariable recoveryindexbuild;

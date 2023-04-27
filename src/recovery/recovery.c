@@ -2112,6 +2112,14 @@ worker_send_msg(int worker_id, Pointer msg, uint64 msg_size)
 {
 	RecoveryWorkerState *state = &workers_pool[worker_id];
 
+	if(!workers_pool)
+	{
+		volatile int i=1;
+		while(i){
+			pg_usleep(10000L);
+					}
+	}
+	Assert(state);
 	if ((RECOVERY_QUEUE_BUF_SIZE - state->queue_buf_len) < msg_size)
 		worker_queue_flush(worker_id);
 

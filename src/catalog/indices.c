@@ -847,7 +847,8 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		if (btshared->nrecoveryworkers != 0)
 		{
 			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
-			workers_send_o_table(o_table_serialized, o_table_size, false);
+			ConditionVariableBroadcast(&recovery_oidxshared->recoveryleaderstarted);
+		//	workers_send_o_table(o_table_serialized, o_table_size, false);
 		}
 
 		pfree(o_table_serialized);
@@ -1275,9 +1276,14 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 
 			/* lock other recovery workers access while index is built */
 			ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild);
+			ConditionVariableInit(&recovery_oidxshared->recoveryleaderstarted);
 			recovery_oidxshared->oids = descr->oids;
 
 			workers_send_o_table(o_table_serialized, o_table_size, true);
+			/* Wait while leader initializes, then send message to workers to join */
+			ConditionVariableSleep(&recovery_oidxshared->recoveryleaderstarted, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			workers_send_o_table(o_table_serialized, o_table_size, false);
+
 			pfree(o_table_serialized);
 			goto go_out;
 		}
