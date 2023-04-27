@@ -360,7 +360,6 @@ recovery_shmem_init(Pointer ptr, bool found)
 		pg_atomic_init_u64(recovery_finished_list_ptr, InvalidXLogRecPtr);
 
 		ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild_indexbuild);
-		ConditionVariableInit(&recovery_oidxshared->recoveryleaderstarted);
 	}
 }
 

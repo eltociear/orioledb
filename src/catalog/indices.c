@@ -1280,6 +1280,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 			SpinLockAcquire(&recovery_oidxshared->mutex);
 			recovery_oidxshared->oids = descr->oids;
 			ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild_modify);
+			ConditionVariableInit(&recovery_oidxshared->recoveryleaderstarted);
 			SpinLockRelease(&recovery_oidxshared->mutex);
 
 			/* Send recovery message to become a leader */
