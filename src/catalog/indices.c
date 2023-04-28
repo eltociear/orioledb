@@ -54,6 +54,8 @@
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
 
+#define SEND_TO_LEADER 1
+#define SEND_TO_WORKERS 0
 /* copied from nbtsort.c with modifications*/
 
 /* Magic numbers for parallel state sharing */
@@ -638,7 +640,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 
 /* Send o_table to all recovery workers */
 static void
-workers_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
+recovery_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
 {
 	RecoveryMsgIdxBuild *cur_chunk;
 	uint64				sent_net_size = 0,
@@ -776,7 +778,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	else
 	{
 		/*
-		 * o_table is transferred to recovery workers using workers_send_o_table()
+		 * o_table is transferred to recovery workers using recovery_send_o_table()
 		 * and doesn't occupy space in btshared
 		 */
 		btshared = recovery_oidxshared;
@@ -849,6 +851,15 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
 		}
 
+//		if(in_recovery)
+//	{
+//		int volatile a=1;
+//		while(a)
+//			pg_usleep(10000L);
+//	}
+
+		LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
+
 		pfree(o_table_serialized);
 
 		elog(DEBUG4, "Parallel index build uses %d recovery workers", btshared->nrecoveryworkers);
@@ -871,6 +882,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	}
 	else
 	{
+	if(in_recovery)
+	{
+		int volatile a=1;
+		while(a)
+			pg_usleep(10000L);
+	}
+
 		if (btshared->nrecoveryworkers == 0)
 			return;
 	}
@@ -880,7 +898,9 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
+	{
 		_o_index_leader_participate_as_worker(buildstate);
+	}
 
 	Assert(in_recovery == is_recovery_in_progress());
 	/*
@@ -891,9 +911,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		WaitForParallelWorkersToAttach(pcxt);
 	else
 	{
-		ConditionVariableSignal(&recovery_oidxshared->recoveryleaderstarted);
-
-		while(btshared->nrecoveryworkersjoined < btshared->nrecoveryworkers)
+		while (btshared->nrecoveryworkersjoined < btshared->nrecoveryworkers)
 		{
 			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
@@ -1076,6 +1094,14 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 	InstrStartParallelQuery();
 
 	/* Perform sorting of spool */
+	if(btshared->scantuplesortstates == 0)
+	{
+		int volatile a=1;
+		while(a)
+		{
+			pg_usleep(10000L);
+		}
+	}
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
 	btshared->worker_heap_sort_fn(btspool, btshared, sharedsort,
 							   sortmem, false);
@@ -1272,23 +1298,23 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 		if (is_recovery_in_progress() && !(*recovery_single_process) && !in_dedicated_recovery_worker)
 		{
 			/* If other index build is in progress, wait until it finishes */
-			ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_indexbuild, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			LWLockAcquire(&recovery_oidxshared->recoveryidxbuild, LW_EXCLUSIVE);
 			o_table_serialized = serialize_o_table(o_table, &o_table_size);
 			recovery_oidxshared->ix_num = ix_num;
 
 			/* Prevent rel modify during index build */
 			SpinLockAcquire(&recovery_oidxshared->mutex);
 			recovery_oidxshared->oids = descr->oids;
-			ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild_modify);
-			ConditionVariableInit(&recovery_oidxshared->recoveryleaderstarted);
+			LWLockAcquire(&recovery_oidxshared->recoveryidxbuild_modify, LW_EXCLUSIVE);
 			SpinLockRelease(&recovery_oidxshared->mutex);
 
 			/* Send recovery message to become a leader */
-			workers_send_o_table(o_table_serialized, o_table_size, true);
+			LWLockAcquire(&recovery_oidxshared->recoveryidxleaderstarted, LW_EXCLUSIVE);
+			recovery_send_o_table(o_table_serialized, o_table_size, SEND_TO_LEADER);
 			/* Wait while leader initializes, then send message to workers to join */
-			ConditionVariableSleep(&recovery_oidxshared->recoveryleaderstarted, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-			/* Send recovery message to workers to join */
-			workers_send_o_table(o_table_serialized, o_table_size, false);
+			LWLockAcquire(&recovery_oidxshared->recoveryidxleaderstarted, LW_EXCLUSIVE);
+			LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
+			recovery_send_o_table(o_table_serialized, o_table_size, SEND_TO_WORKERS);
 
 			pfree(o_table_serialized);
 			goto go_out;

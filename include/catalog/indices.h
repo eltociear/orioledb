@@ -65,11 +65,16 @@ typedef struct oIdxShared
 
 	/* Look for recovery workers joined parallel operation */
 	ConditionVariable recoveryworkersjoinedcv;
-	ConditionVariable recoveryleaderstarted;
-	ConditionVariable recoveryindexbuild_indexbuild;
+	/* Wait for parallel leader init shmem structures before workers start */
+	int 	tranche_recoveryidxleaderstarted;
+	LWLock recoveryidxleaderstarted;
+	/* Wait for parallel idx build finish before starting another parallel build */
+	int		tranche_recoveryidxbuild;
+	LWLock recoveryidxbuild;
 	/* Exclude relation with index being built in recovery from applying recovery modify messages
 	 * concurrently */
-	ConditionVariable recoveryindexbuild_modify;
+	int 	tranche_recoveryidxbuild_modify;
+	LWLock recoveryidxbuild_modify;
 	ORelOids	oids;
 
 	/*

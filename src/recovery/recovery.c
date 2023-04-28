@@ -333,7 +333,16 @@ recovery_shmem_init(Pointer ptr, bool found)
 	recovery_sharedsort = (Sharedsort *) ptr;
 	ptr += CACHELINEALIGN(tuplesort_estimate_shared(recovery_idx_pool_size_guc + 1));
 
-	ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild_indexbuild);
+	recovery_oidxshared->tranche_recoveryidxbuild = LWLockNewTrancheId();
+	recovery_oidxshared->tranche_recoveryidxbuild_modify = LWLockNewTrancheId();
+	recovery_oidxshared->tranche_recoveryidxleaderstarted = LWLockNewTrancheId();
+	LWLockInitialize(&recovery_oidxshared->recoveryidxbuild,
+			recovery_oidxshared->tranche_recoveryidxbuild);
+	LWLockInitialize(&recovery_oidxshared->recoveryidxbuild_modify,
+			recovery_oidxshared->tranche_recoveryidxbuild_modify);
+	LWLockInitialize(&recovery_oidxshared->recoveryidxleaderstarted,
+			recovery_oidxshared->tranche_recoveryidxleaderstarted);
+
 	recovery_queue_data_size = recovery_queue_size_guc;
 
 	if (!found)

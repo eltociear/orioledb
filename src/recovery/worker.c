@@ -342,7 +342,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					/* If index is now being built for a relation, wait until it finished before modifying it */
 					if (ORelOidsIsEqual(oids, recovery_oidxshared->oids))
 					{
-						ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);						
+						LWLockAcquire(&recovery_oidxshared->recoveryidxbuild_modify, LW_EXCLUSIVE);
+						LWLockRelease(&recovery_oidxshared->recoveryidxbuild_modify);
 					}
 #endif
 					apply_modify_record(descr, indexDescr,
@@ -397,8 +398,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						 * Wakeup other recovery workers that may wait to do their modify operations on
 						 * this relation
 						 */
-						ConditionVariableBroadcast(&recovery_oidxshared->recoveryindexbuild_modify);
-						ConditionVariableSignal(&recovery_oidxshared->recoveryindexbuild_indexbuild);
+						LWLockRelease(&recovery_oidxshared->recoveryidxbuild_modify);
+						LWLockRelease(&recovery_oidxshared->recoveryidxbuild);
 					}
 					pfree(o_table_serialized);
 				}
@@ -437,7 +438,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
 #if PG_VERSION_NUM >= 140000
-				ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_modify, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+				LWLockAcquire(&recovery_oidxshared->recoveryidxbuild_modify, LW_EXCLUSIVE);
+				LWLockRelease(&recovery_oidxshared->recoveryidxbuild_modify);
 #endif
 				finished = true;
 				break;
