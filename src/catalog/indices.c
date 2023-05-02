@@ -640,7 +640,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 
 /* Send o_table to all recovery workers */
 static void
-recovery_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
+recovery_send_idxbuild(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
 {
 	RecoveryMsgIdxBuild *cur_chunk;
 	uint64				sent_net_size = 0,
@@ -778,7 +778,7 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	else
 	{
 		/*
-		 * o_table is transferred to recovery workers using recovery_send_o_table()
+		 * o_table is transferred to recovery workers using recovery_send_idxbuild()
 		 * and doesn't occupy space in btshared
 		 */
 		btshared = recovery_oidxshared;
@@ -851,14 +851,22 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 			tuplesort_initialize_shared(sharedsort, btshared->scantuplesortstates, NULL);
 		}
 
-//		if(in_recovery)
-//	{
-//		int volatile a=1;
-//		while(a)
-//			pg_usleep(10000L);
-//	}
+		if(in_recovery)
+	{
+		int volatile a=1;
+		while(a)
+			pg_usleep(10000L);
+	}
 
-		LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
+		if(! (*recovery_single_process))
+			LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
+
+	if(in_recovery)
+	{
+		int volatile a=1;
+		while(a)
+			pg_usleep(10000L);
+	}
 
 		pfree(o_table_serialized);
 
@@ -1310,11 +1318,11 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 
 			/* Send recovery message to become a leader */
 			LWLockAcquire(&recovery_oidxshared->recoveryidxleaderstarted, LW_EXCLUSIVE);
-			recovery_send_o_table(o_table_serialized, o_table_size, SEND_TO_LEADER);
+			recovery_send_idxbuild(o_table_serialized, o_table_size, SEND_TO_LEADER);
 			/* Wait while leader initializes, then send message to workers to join */
-			LWLockAcquire(&recovery_oidxshared->recoveryidxleaderstarted, LW_EXCLUSIVE);
-			LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
-			recovery_send_o_table(o_table_serialized, o_table_size, SEND_TO_WORKERS);
+			if (LWLockAcquireOrWait(&recovery_oidxshared->recoveryidxleaderstarted, LW_EXCLUSIVE))
+				LWLockRelease(&recovery_oidxshared->recoveryidxleaderstarted);
+			recovery_send_idxbuild(o_table_serialized, o_table_size, SEND_TO_WORKERS);
 
 			pfree(o_table_serialized);
 			goto go_out;
