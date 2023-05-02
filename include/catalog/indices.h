@@ -63,13 +63,13 @@ typedef struct oIdxShared
 	 */
 	ConditionVariable workersdonecv;
 
+	ConditionVariable recoverycv;
 	/* Look for recovery workers joined parallel operation */
-	ConditionVariable recoveryworkersjoinedcv;
-	ConditionVariable recoveryleaderstarted;
-	ConditionVariable recoveryindexbuild_indexbuild;
+	bool recoveryleaderstarted;
+	bool recoveryindexbuild_indexbuild;
 	/* Exclude relation with index being built in recovery from applying recovery modify messages
 	 * concurrently */
-	ConditionVariable recoveryindexbuild_modify;
+	bool recoveryindexbuild_modify;
 	ORelOids	oids;
 
 	/*

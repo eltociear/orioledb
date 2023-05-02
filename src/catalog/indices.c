@@ -801,7 +801,6 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 	btshared->scantuplesortstates = scantuplesortstates;
 	btshared->worker_heap_sort_fn = buildstate->worker_heap_sort_fn;
 	/* Initialize mutable state */
-	ConditionVariableInit(&btshared->recoveryworkersjoinedcv);
 	ConditionVariableInit(&btshared->workersdonecv);
 	SpinLockInit(&btshared->mutex);
 	btshared->nrecoveryworkersjoined = 0;
@@ -891,12 +890,13 @@ _o_index_begin_parallel(oIdxBuildState *buildstate, bool isconcurrent, int reque
 		WaitForParallelWorkersToAttach(pcxt);
 	else
 	{
-		ConditionVariableSignal(&recovery_oidxshared->recoveryleaderstarted);
+		recovery_oidxshared->recoveryleaderstarted = true;
+		ConditionVariableBroadcast(&recovery_oidxshared->recoverycv);
 
 		while(btshared->nrecoveryworkersjoined < btshared->nrecoveryworkers)
-		{
-			ConditionVariableSleep(&btshared->recoveryworkersjoinedcv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-		}
+			ConditionVariableSleep(&btshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		ConditionVariableCancelSleep();
 	}
 }
 
@@ -1137,7 +1137,7 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	SpinLockAcquire(&btshared->mutex);
 	btshared->nrecoveryworkersjoined++;
 	SpinLockRelease(&btshared->mutex);
-	ConditionVariableSignal(&btshared->recoveryworkersjoinedcv);
+	ConditionVariableBroadcast(&btshared->recoverycv);
 
 	/* Begin "partial" tuplesort */
 	btspool->sortstates = palloc0(sizeof(Tuplesortstate));
@@ -1272,21 +1272,29 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 		if (is_recovery_in_progress() && !(*recovery_single_process) && !in_dedicated_recovery_worker)
 		{
 			/* If other index build is in progress, wait until it finishes */
-			ConditionVariableSleep(&recovery_oidxshared->recoveryindexbuild_indexbuild, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			while (recovery_oidxshared->recoveryindexbuild_indexbuild)
+				ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			ConditionVariableCancelSleep();
+
 			o_table_serialized = serialize_o_table(o_table, &o_table_size);
 			recovery_oidxshared->ix_num = ix_num;
 
 			/* Prevent rel modify during index build */
 			SpinLockAcquire(&recovery_oidxshared->mutex);
 			recovery_oidxshared->oids = descr->oids;
-			ConditionVariableInit(&recovery_oidxshared->recoveryindexbuild_modify);
-			ConditionVariableInit(&recovery_oidxshared->recoveryleaderstarted);
+			recovery_oidxshared->recoveryleaderstarted = false;
+			recovery_oidxshared->recoveryindexbuild_modify = true;
+			recovery_oidxshared->recoveryindexbuild_indexbuild = true;
 			SpinLockRelease(&recovery_oidxshared->mutex);
 
 			/* Send recovery message to become a leader */
 			workers_send_o_table(o_table_serialized, o_table_size, true);
 			/* Wait while leader initializes, then send message to workers to join */
-			ConditionVariableSleep(&recovery_oidxshared->recoveryleaderstarted, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			while(!recovery_oidxshared->recoveryleaderstarted)
+				ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			ConditionVariableCancelSleep();
 			/* Send recovery message to workers to join */
 			workers_send_o_table(o_table_serialized, o_table_size, false);
 
