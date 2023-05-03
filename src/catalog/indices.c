@@ -1272,6 +1272,8 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 		 * Don't proceed parallel index creation in main recovery worker.
 		 * Send message to main index creation worker in dedicated recovery workers pool
 		 */
+
+#if PG_VERSION_NUM >= 140000
 		if (is_recovery_in_progress() && !(*recovery_single_process) && !in_dedicated_recovery_worker)
 		{
 			/* If other index build is in progress, wait until it finishes */
@@ -1304,6 +1306,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 			pfree(o_table_serialized);
 			goto go_out;
 		}
+#endif
 
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 		btspool->o_table = o_table;
