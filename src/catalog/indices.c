@@ -1256,10 +1256,7 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 	double		*index_tuples;
 	int 		nParallelWorkers = 3;
 	OIndexDescr *idx;
-	int		 	o_table_size = 0;
-	Pointer 	o_table_serialized;
 
-	index_tuples = palloc0(sizeof(double));
 	ctid = 1;
 	idx = descr->indices[o_table->has_primary ? ix_num : ix_num + 1];
 
@@ -1276,6 +1273,9 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 #if PG_VERSION_NUM >= 140000
 		if (is_recovery_in_progress() && !(*recovery_single_process) && !in_dedicated_recovery_worker)
 		{
+			int		 	o_table_size = 0;
+			Pointer 	o_table_serialized;
+
 			/* If other index build is in progress, wait until it finishes */
 			while (recovery_oidxshared->recoveryidxbuild)
 				ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -1304,9 +1304,10 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 			recovery_send_o_table(o_table_serialized, o_table_size, false);
 
 			pfree(o_table_serialized);
-			goto go_out;
+			return;
 		}
 #endif
+		index_tuples = palloc0(sizeof(double));
 
 		btspool = (oIdxSpool *) palloc0(sizeof(oIdxSpool));
 		btspool->o_table = o_table;
@@ -1396,7 +1397,6 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 		index_close(indexRelation, AccessExclusiveLock);
 	}
 
-go_out:
 	pfree(index_tuples);
 }
 
