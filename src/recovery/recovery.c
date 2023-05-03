@@ -331,8 +331,8 @@ recovery_shmem_init(Pointer ptr, bool found)
 	ptr += CACHELINEALIGN(_o_index_parallel_estimate_shared(0));
 	ConditionVariableInit(&recovery_oidxshared->recoverycv);
 	recovery_oidxshared->recoveryleaderstarted = false;
-	recovery_oidxshared->recoveryindexbuild_indexbuild = false;
-	recovery_oidxshared->recoveryindexbuild_modify = false;
+	recovery_oidxshared->recoveryidxbuild = false;
+	recovery_oidxshared->recoveryidxbuild_modify = false;
 
 	recovery_sharedsort = (Sharedsort *) ptr;
 	ptr += CACHELINEALIGN(tuplesort_estimate_shared(recovery_idx_pool_size_guc + 1));

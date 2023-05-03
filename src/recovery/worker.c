@@ -275,9 +275,11 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				data_pos;
 	bool		finished = false;
 	OXid		oxid;
+#if PG_VERSION_NUM >= 140000
 	Size 		expected_table_size = 0,
 				actual_table_size = 0;
 	char	   *o_table_serialized = NULL;
+#endif
 
 	while (!finished)
 	{
@@ -342,7 +344,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					/* If index is now being built for a relation, wait until it finished before modifying it */
 					if (ORelOidsIsEqual(oids, recovery_oidxshared->oids))
 					{
-						while(recovery_oidxshared->recoveryindexbuild_modify)
+						while(recovery_oidxshared->recoveryidxbuild_modify)
 							ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 						ConditionVariableCancelSleep();
@@ -363,7 +365,6 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				Assert(data_pos == 0);
 				if (msg->o_table_size)
 				{
-					//Assert(msg->o_table_size == recovery_oidxshared->o_table_size);
 					actual_table_size = 0;
 					expected_table_size = msg->o_table_size;
 					o_table_serialized = palloc0(expected_table_size);
@@ -378,6 +379,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				{
 					if (recovery_header->type & RECOVERY_WORKER_PARALLEL_INDEX_BUILD)
 					{
+						Assert(expected_table_size == recovery_oidxshared->o_table_size);
 						Assert(recovery_idx_pool_size_guc <= id &&
 								id < recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
 						/* participate as a worker in parallel index build */
@@ -400,8 +402,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						 * Wakeup other recovery workers that may wait to do their modify operations on
 						 * this relation
 						 */
-						recovery_oidxshared->recoveryindexbuild_modify = false;
-						recovery_oidxshared->recoveryindexbuild_indexbuild = false;
+						recovery_oidxshared->recoveryidxbuild_modify = false;
+						recovery_oidxshared->recoveryidxbuild = false;
 						ConditionVariableBroadcast(&recovery_oidxshared->recoverycv);
 					}
 					pfree(o_table_serialized);
@@ -441,7 +443,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
 #if PG_VERSION_NUM >= 140000
-				while(recovery_oidxshared->recoveryindexbuild_modify)
+				while(recovery_oidxshared->recoveryidxbuild_modify)
 					ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 				ConditionVariableCancelSleep();
