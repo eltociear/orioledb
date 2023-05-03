@@ -636,6 +636,7 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 		LWLockRelease(&checkpoint_state->oTablesAddLock);
 }
 
+#if PG_VERSION_NUM >= 140000
 /* Send o_table to all recovery workers */
 static void
 recovery_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
@@ -679,6 +680,7 @@ recovery_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to
 
 	pfree(cur_chunk);
 }
+#endif
 
 /*
  * Invoke workers for leader. For non-recovery create parallel context and launch
