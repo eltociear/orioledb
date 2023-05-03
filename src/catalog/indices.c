@@ -1133,11 +1133,14 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	o_table = btspool->o_table;
 	idx = btspool->descr->indices[o_table->has_primary ? btshared->ix_num : btshared->ix_num + 1];
 
-	/* Track recovery workers joined parallel operation */
-	SpinLockAcquire(&btshared->mutex);
-	btshared->nrecoveryworkersjoined++;
-	SpinLockRelease(&btshared->mutex);
-	ConditionVariableBroadcast(&btshared->recoverycv);
+	if (is_recovery_in_progress() && !(*recovery_single_process))
+	{
+		/* Track recovery workers joined parallel operation */
+		SpinLockAcquire(&btshared->mutex);
+		btshared->nrecoveryworkersjoined++;
+		SpinLockRelease(&btshared->mutex);
+		ConditionVariableBroadcast(&btshared->recoverycv);
+	}
 
 	/* Begin "partial" tuplesort */
 	btspool->sortstates = palloc0(sizeof(Tuplesortstate));
