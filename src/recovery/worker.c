@@ -275,11 +275,6 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				data_pos;
 	bool		finished = false;
 	OXid		oxid;
-#if PG_VERSION_NUM >= 140000
-	Size 		expected_table_size = 0,
-				actual_table_size = 0;
-	char	   *o_table_serialized = NULL;
-#endif
 
 	while (!finished)
 	{
@@ -360,59 +355,42 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			else if (recovery_header->type & (RECOVERY_LEADER_PARALLEL_INDEX_BUILD | RECOVERY_WORKER_PARALLEL_INDEX_BUILD ))
 			{
 				RecoveryMsgIdxBuild 	*msg = (RecoveryMsgIdxBuild *) (data + data_pos);
-				Size 					cur_chunk_size = data_size - offsetof(RecoveryMsgIdxBuild, o_table_serialized);
+				OTable 					*o_table;
+				ORelOids				oids;
 
 				Assert(data_pos == 0);
+				memcpy(&oids, &msg->oids, sizeof(ORelOids));
+				Assert(ORelOidsIsValid(oids));
+				o_table = o_tables_get(oids);
 
-				/* First chunk of *PARALLEL_INDEX_BUILD recovery message */
-				if (msg->o_table_size)
+				if (recovery_header->type & RECOVERY_WORKER_PARALLEL_INDEX_BUILD)
 				{
-					actual_table_size = 0;
-					expected_table_size = msg->o_table_size;
-					o_table_serialized = palloc0(expected_table_size);
+					Assert(recovery_idx_pool_size_guc <= id &&
+							id < recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
+					/* participate as a worker in parallel index build */
+					_o_index_parallel_build_inner(NULL, NULL, o_table);
 				}
-
-				Assert(expected_table_size > 0 && o_table_serialized != NULL);
-				memcpy(o_table_serialized + actual_table_size, msg->o_table_serialized, cur_chunk_size);
-				actual_table_size += cur_chunk_size;
-				Assert(actual_table_size <= expected_table_size);
-
-				if (actual_table_size == expected_table_size)
+				else if (recovery_header->type & RECOVERY_LEADER_PARALLEL_INDEX_BUILD)
 				{
-					if (recovery_header->type & RECOVERY_WORKER_PARALLEL_INDEX_BUILD)
-					{
-						Assert(expected_table_size == recovery_oidxshared->o_table_size);
-						Assert(recovery_idx_pool_size_guc <= id &&
-								id < recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
-						/* participate as a worker in parallel index build */
-						_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
-					}
-					else if (recovery_header->type & RECOVERY_LEADER_PARALLEL_INDEX_BUILD)
-					{
-						OTable 		*o_table;
-						OTableDescr *descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
+					OTableDescr *descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
 
-						Assert(id == recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
-						/*
-						 * start a parallel index build in a dedicated pool of recovery
-						 * workers and become their leader
-						 */
-						o_table = deserialize_o_table(o_table_serialized, actual_table_size);
-						o_fill_tmp_table_descr(descr, o_table);
-						build_secondary_index(o_table, descr, recovery_oidxshared->ix_num, true);
-						/*
-						 * Wakeup other recovery workers that may wait to do their modify operations on
-						 * this relation
-						 */
-						recovery_oidxshared->recoveryidxbuild_modify = false;
-						recovery_oidxshared->recoveryidxbuild = false;
-						ConditionVariableBroadcast(&recovery_oidxshared->recoverycv);
-						o_free_tmp_table_descr(descr);
-						pfree(descr);
-						pfree(o_table);
-					}
-					pfree(o_table_serialized);
-					actual_table_size = 0;
+					Assert(id == recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
+					/*
+					 * start a parallel index build in a dedicated pool of recovery
+					 * workers and become their leader
+					 */
+					o_fill_tmp_table_descr(descr, o_table);
+					build_secondary_index(o_table, descr, recovery_oidxshared->ix_num, true);
+					/*
+					 * Wakeup other recovery workers that may wait to do their modify operations on
+					 * this relation
+					 */
+					recovery_oidxshared->recoveryidxbuild_modify = false;
+					recovery_oidxshared->recoveryidxbuild = false;
+					ConditionVariableBroadcast(&recovery_oidxshared->recoverycv);
+					o_free_tmp_table_descr(descr);
+					pfree(descr);
+					pfree(o_table);
 				}
 
 				data_pos += data_size;

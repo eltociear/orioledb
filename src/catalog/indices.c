@@ -639,46 +639,35 @@ o_define_index(Relation rel, Oid indoid, bool reindex,
 #if PG_VERSION_NUM >= 140000
 /* Send o_table to all recovery workers */
 static void
-recovery_send_o_table(Pointer o_table_serialized, int o_table_size, bool send_to_leader)
+recovery_send_oids(ORelOids oids, bool send_to_leader)
 {
-	RecoveryMsgIdxBuild *cur_chunk;
-	uint64				sent_net_size = 0,
-						cur_net_size,
-						cur_chunk_size,
-						header_size = offsetof(RecoveryMsgIdxBuild, o_table_serialized);
+	RecoveryMsgIdxBuild *msg;
 	int 				i;
 	int 				index_build_leader = recovery_idx_pool_size_guc + recovery_pool_size_guc - 1;
 	int					index_build_first_worker = recovery_pool_size_guc;
 
 	Assert(!(*recovery_single_process));
-	cur_chunk = palloc(Min(header_size + o_table_size, RECOVERY_QUEUE_BUF_SIZE));
+	Assert(ORelOidsIsValid(oids));
 
-	while (sent_net_size < o_table_size)
-	{
-		cur_net_size = Min(o_table_size - sent_net_size, RECOVERY_QUEUE_BUF_SIZE - header_size);
-		cur_chunk_size = header_size + cur_net_size;
-		cur_chunk->header.type = send_to_leader ? RECOVERY_LEADER_PARALLEL_INDEX_BUILD :
+	msg = palloc0(sizeof(RecoveryMsgIdxBuild));
+	msg->header.type = send_to_leader ? RECOVERY_LEADER_PARALLEL_INDEX_BUILD :
 												  RECOVERY_WORKER_PARALLEL_INDEX_BUILD;
-		cur_chunk->o_table_size = (sent_net_size == 0) ? o_table_size : 0;
-		memcpy(&cur_chunk->o_table_serialized, o_table_serialized + sent_net_size, cur_net_size);
+	memcpy(&msg->oids, &oids, sizeof(ORelOids));
 
-		if (send_to_leader)
-		{
-			worker_send_msg(index_build_leader, (Pointer) cur_chunk, cur_chunk_size);
-			worker_queue_flush(index_build_leader);
-		}
-		else
-		{
-			for (i = index_build_first_worker; i < index_build_leader; i++)
-			{
-				worker_send_msg(i, (Pointer) cur_chunk, cur_chunk_size);
-				worker_queue_flush(i);
-			}
-		}
-		sent_net_size += cur_net_size;
+	if (send_to_leader)
+	{
+		worker_send_msg(index_build_leader, (Pointer) msg, sizeof(RecoveryMsgIdxBuild));
+		worker_queue_flush(index_build_leader);
 	}
-
-	pfree(cur_chunk);
+	else
+	{
+		for (i = index_build_first_worker; i < index_build_leader; i++)
+		{
+			worker_send_msg(i, (Pointer) msg, sizeof(RecoveryMsgIdxBuild));
+			worker_queue_flush(i);
+		}
+	}
+	pfree(msg);
 }
 #endif
 
@@ -1010,7 +999,7 @@ _o_index_leader_participate_as_worker(oIdxBuildState *buildstate)
  */
 void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
-	_o_index_parallel_build_inner(seg, toc, NULL, 0);
+	_o_index_parallel_build_inner(seg, toc, NULL);
 }
 
 /*
@@ -1019,9 +1008,7 @@ void _o_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
  * serialized o_table as an explicit argument.
  */
 void
-_o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
-							char *recovery_o_table_serialized,
-							Size recovery_o_table_size)
+_o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc, OTable *recovery_o_table)
 {
 	oIdxSpool    *btspool;
 	oIdxShared   *btshared;
@@ -1045,7 +1032,7 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 		 * btshared is allocated to contain serialized o_table
 		 */
 
-		Assert(recovery_o_table_size == 0 && recovery_o_table_serialized == NULL);
+		Assert(recovery_o_table == NULL);
 		/* Look up nbtree shared state */
 		btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
 		btspool->o_table = deserialize_o_table((Pointer)(&btshared->o_table_serialized), btshared->o_table_size);
@@ -1063,9 +1050,7 @@ _o_index_parallel_build_inner(dsm_segment *seg, shm_toc *toc,
 
 		Assert(seg == NULL && toc == NULL);
 		btshared = recovery_oidxshared;
-		/* Size transferred through recovery message is the same one as stored in shared state */
-		//Assert(recovery_o_table_size == btshared->o_table_size);
-		btspool->o_table = deserialize_o_table((Pointer) recovery_o_table_serialized, recovery_o_table_size);
+		btspool->o_table = recovery_o_table;
 		sharedsort = recovery_sharedsort;
 	}
 
@@ -1274,16 +1259,12 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 #if PG_VERSION_NUM >= 140000
 		if (is_recovery_in_progress() && !(*recovery_single_process) && !in_dedicated_recovery_worker)
 		{
-			int		 	o_table_size = 0;
-			Pointer 	o_table_serialized;
-
 			/* If other index build is in progress, wait until it finishes */
 			while (recovery_oidxshared->recoveryidxbuild)
 				ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 			ConditionVariableCancelSleep();
 
-			o_table_serialized = serialize_o_table(o_table, &o_table_size);
 			recovery_oidxshared->ix_num = ix_num;
 
 			/* Prevent rel modify during index build */
@@ -1295,16 +1276,15 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 			SpinLockRelease(&recovery_oidxshared->mutex);
 
 			/* Send recovery message to become a leader */
-			recovery_send_o_table(o_table_serialized, o_table_size, true);
+			recovery_send_oids(recovery_oidxshared->oids, true);
 			/* Wait while leader initializes, then send message to workers to join */
 			while(!recovery_oidxshared->recoveryleaderstarted)
 				ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 			ConditionVariableCancelSleep();
 			/* Send recovery message to workers to join */
-			recovery_send_o_table(o_table_serialized, o_table_size, false);
+			recovery_send_oids(recovery_oidxshared->oids, false);
 
-			pfree(o_table_serialized);
 			return;
 		}
 #endif
