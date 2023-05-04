@@ -363,6 +363,8 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 				Size 					cur_chunk_size = data_size - offsetof(RecoveryMsgIdxBuild, o_table_serialized);
 
 				Assert(data_pos == 0);
+
+				/* First chunk of *PARALLEL_INDEX_BUILD recovery message */
 				if (msg->o_table_size)
 				{
 					actual_table_size = 0;
@@ -405,8 +407,12 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						recovery_oidxshared->recoveryidxbuild_modify = false;
 						recovery_oidxshared->recoveryidxbuild = false;
 						ConditionVariableBroadcast(&recovery_oidxshared->recoverycv);
+						o_free_tmp_table_descr(descr);
+						pfree(descr);
+						pfree(o_table);
 					}
 					pfree(o_table_serialized);
+					actual_table_size = 0;
 				}
 
 				data_pos += data_size;
