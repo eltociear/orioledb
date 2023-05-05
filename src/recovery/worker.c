@@ -221,7 +221,11 @@ recovery_worker_main(Datum main_arg)
 		recovery_finish(id);
 		LockReleaseSession(DEFAULT_LOCKMETHOD);
 
-		pg_atomic_fetch_add_u32(worker_finish_count, 1);
+		if(id <= index_build_leader)
+			pg_atomic_fetch_add_u32(worker_finish_count, 1);
+		else
+			pg_atomic_fetch_add_u32(idx_worker_finish_count, 1);
+
 		elog(LOG, "orioledb recovery worker %d finished.", id);
 		proc_exit(0);
 	}
@@ -382,8 +386,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 					if (recovery_header->type & RECOVERY_WORKER_PARALLEL_INDEX_BUILD)
 					{
 						Assert(expected_table_size == recovery_oidxshared->o_table_size);
-						Assert(recovery_idx_pool_size_guc <= id &&
-								id < recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
+						Assert(index_build_first_worker <= id && id <= index_build_last_worker);
 						/* participate as a worker in parallel index build */
 						_o_index_parallel_build_inner(NULL, NULL, o_table_serialized, actual_table_size);
 					}
@@ -392,7 +395,7 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 						OTable 		*o_table;
 						OTableDescr *descr = (OTableDescr *) palloc0(sizeof(OTableDescr));
 
-						Assert(id == recovery_idx_pool_size_guc + recovery_pool_size_guc - 1);
+						Assert(id == index_build_leader);
 						/*
 						 * start a parallel index build in a dedicated pool of recovery
 						 * workers and become their leader
@@ -449,6 +452,11 @@ recovery_queue_process(shm_mq_handle *queue, int id)
 			else if (recovery_header->type & RECOVERY_FINISHED)
 			{
 #if PG_VERSION_NUM >= 140000
+				if (id == index_build_leader)
+				{
+					idx_workers_shutdown();
+				}
+
 				while(recovery_oidxshared->recoveryidxbuild_modify)
 					ConditionVariableSleep(&recovery_oidxshared->recoverycv, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 

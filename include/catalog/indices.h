@@ -20,6 +20,19 @@
 #include "catalog/o_tables.h"
 #include "tableam/descr.h"
 
+#define recovery_first_worker 	 (0)
+#define recovery_last_worker 	 (recovery_pool_size_guc - 1)
+#define recovery_workers		 (recovery_pool_size_guc)
+#define index_build_leader 		 (recovery_pool_size_guc)
+#define index_build_first_worker (recovery_pool_size_guc + 1)
+#define index_build_last_worker  (recovery_pool_size_guc + recovery_idx_pool_size_guc - 1)
+#define index_build_workers 	 (recovery_idx_pool_size_guc - 1)
+typedef struct BgWorkerHandle
+{
+	int			slot;
+	uint64		generation;
+} BgWorkerHandle;
+
 typedef struct ODefineIndexContext
 {
 	Oid			oldNode;
@@ -64,8 +77,6 @@ typedef struct oIdxShared
 	ConditionVariable workersdonecv;
 
 	ConditionVariable recoverycv;
-	/* Wait until recovery leader init shared state */
-	bool recoveryleaderstarted;
 	/* Don't start next index build in recovery while current is in progress */
 	bool recoveryidxbuild;
 	/* Exclude relation with index being built in recovery from applying recovery modify messages
@@ -101,6 +112,7 @@ typedef struct oIdxShared
 	void       (*worker_heap_sort_fn) (oIdxSpool *, void *, Sharedsort *, int sortmem, bool progress);
 	ParallelOScanDescData poscan;
 	OIndexNumber   ix_num;
+	BgWorkerHandle *worker_handle;
 	Size 		   o_table_size;
 	char 		   o_table_serialized[];
 } oIdxShared;

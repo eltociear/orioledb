@@ -123,6 +123,7 @@ typedef struct
 
 extern bool toast_consistent;
 extern pg_atomic_uint32 *worker_finish_count;
+extern pg_atomic_uint32 *idx_worker_finish_count;
 extern pg_atomic_uint32 *worker_ptrs_changes;
 extern RecoveryWorkerPtrs *worker_ptrs;
 extern pg_atomic_uint64 *recovery_ptr;
