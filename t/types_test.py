@@ -70,7 +70,7 @@ class TypesTest(BaseTest):
 				VALUES (8, 'ecstatic');
 		""")
 
-		enum_amount += 1 # o_happiness
+		enum_amount += 4 # 'happy', 'sad', 'very happy', 'ecstatic'
 		enumoid_amount += 4 # 'happy', 'sad', 'very happy', 'ecstatic'
 		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 0)
 		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 0)
@@ -83,7 +83,7 @@ class TypesTest(BaseTest):
 		node.start()
 		# deleted records in o_enum_cache physically deleted during checkpoint
 		# performed after recovery
-		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 1)
+		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 4)
 		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 4)
 		node.stop()
 
@@ -99,8 +99,10 @@ class TypesTest(BaseTest):
 			) USING orioledb;
 		""")
 		type_amount += 3 # int2, int4, tid - types needed for all our tables
+		type_amount += 1 # int8 - hash_array_extended return type
 		type_amount += 1 # anyarray
 		type_amount += 1 # internal - argument of sort support function
+		type_amount += 1 # void - return type of sort support function
 		self.check_total_deleted(node, 'TYPE_CACHE', type_amount, 0)
 
 		node.execute("INSERT INTO o_test VALUES ('{1, 2}');")
@@ -228,10 +230,14 @@ class TypesTest(BaseTest):
 			) USING orioledb;
 		""")
 		class_amount += 1 # coordinates
-		class_amount += 1 # pg_auth
+		class_amount += 2 # pg_type
+		class_amount += 2 # pg_proc
+		class_amount += 4 # pg_amproc, pg_opclass, pg_amop, pg_authid
 		type_amount += 3 # int2, int4, tid - types needed for all our tables
+		type_amount += 1 # int8 - hash_array_extended return type
 		type_amount += 1 # record
 		type_amount += 1 # internal - argument of sort support function
+		type_amount += 1 # void - return type of sort support function
 		type_amount += 1 # coordinates
 		self.check_total_deleted(node, 'CLASS_CACHE', class_amount, 0)
 		self.check_total_deleted(node, 'TYPE_CACHE', type_amount, 0)
@@ -352,10 +358,14 @@ class TypesTest(BaseTest):
 		""")
 		class_amount += 1 # coordinates
 		class_amount += 1 # coordinates_removed
-		class_amount += 1 # pg_auth
+		class_amount += 2 # pg_type
+		class_amount += 2 # pg_proc
+		class_amount += 4 # pg_amproc, pg_opclass, pg_amop, pg_authid
 		type_amount += 3 # int2, int4, tid - types needed for all our tables
+		type_amount += 1 # int8
 		type_amount += 2 # record, anyarray
 		type_amount += 1 # internal - argument of sort support function
+		type_amount += 1 # void - return type of sort support function
 		type_amount += 2 # coordinates, coordinates_removed
 		self.check_total_deleted(node, 'CLASS_CACHE', class_amount, 0)
 		self.check_total_deleted(node, 'TYPE_CACHE', type_amount, 0)

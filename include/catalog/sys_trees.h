@@ -38,7 +38,8 @@
 #define SYS_TREES_AMPROC_CACHE			(16)
 #define SYS_TREES_COLLATION_CACHE		(17)
 #define SYS_TREES_DATABASE_CACHE		(18)
-#define SYS_TREES_NUM					(18)
+#define SYS_TREES_AMOP_STRAT_CACHE		(19)
+#define SYS_TREES_NUM					(19)
 
 #define IS_SYS_TREE_OIDS(oids) \
 	((oids).datoid == SYS_TREES_DATOID)

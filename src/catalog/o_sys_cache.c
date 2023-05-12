@@ -15,6 +15,7 @@
 
 #include "orioledb.h"
 
+#include "access/hash.h"
 #include "btree/btree.h"
 #include "btree/modify.h"
 #include "catalog/o_sys_cache.h"
@@ -26,6 +27,7 @@
 #include "utils/planner.h"
 
 #include "access/heaptoast.h"
+#include "commands/defrem.h"
 #if PG_VERSION_NUM < 140000
 #include "catalog/indexing.h"
 #endif
@@ -34,9 +36,11 @@
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
+#include "catalog/pg_enum.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_range.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
 #include "executor/functions.h"
@@ -45,6 +49,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgrtab.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 
@@ -121,6 +126,7 @@ o_sys_caches_init(void)
 									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	o_aggregate_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_amop_cache_init(sys_cache_cxt, sys_cache_fastcache);
+	o_amop_strat_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_amproc_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_enum_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_enumoid_cache_init(sys_cache_cxt, sys_cache_fastcache);
@@ -141,6 +147,14 @@ charhashfast(Datum datum)
 }
 
 static uint32
+namehashfast(Datum datum)
+{
+	char	   *key = NameStr(*DatumGetName(datum));
+
+	return hash_any((unsigned char *) key, strlen(key));
+}
+
+static uint32
 int2hashfast(Datum datum)
 {
 	return murmurhash32((int32) DatumGetInt16(datum));
@@ -152,19 +166,62 @@ int4hashfast(Datum datum)
 	return murmurhash32((int32) DatumGetInt32(datum));
 }
 
+static uint32
+texthashfast(Datum datum)
+{
+	/*
+	 * The use of DEFAULT_COLLATION_OID is fairly arbitrary here.  We just
+	 * want to take the fast "deterministic" path in texteq().
+	 */
+	return DatumGetInt32(DirectFunctionCall1Coll(hashtext, DEFAULT_COLLATION_OID, datum));
+}
+
+static uint32
+oidvectorhashfast(Datum datum)
+{
+	return DatumGetInt32(DirectFunctionCall1(hashoidvector, datum));
+}
+
 static void
 set_hash_func(Oid keytype, CCHashFN *hashfunc)
 {
+
 	switch (keytype)
 	{
+		case BOOLOID:
+			*hashfunc = charhashfast;
+			break;
 		case CHAROID:
 			*hashfunc = charhashfast;
+			break;
+		case NAMEOID:
+			*hashfunc = namehashfast;
 			break;
 		case INT2OID:
 			*hashfunc = int2hashfast;
 			break;
-		case OIDOID:
+		case INT4OID:
 			*hashfunc = int4hashfast;
+			break;
+		case TEXTOID:
+			*hashfunc = texthashfast;
+			break;
+		case OIDOID:
+		case REGPROCOID:
+		case REGPROCEDUREOID:
+		case REGOPEROID:
+		case REGOPERATOROID:
+		case REGCLASSOID:
+		case REGTYPEOID:
+		case REGCOLLATIONOID:
+		case REGCONFIGOID:
+		case REGDICTIONARYOID:
+		case REGROLEOID:
+		case REGNAMESPACEOID:
+			*hashfunc = int4hashfast;
+			break;
+		case OIDVECTOROID:
+			*hashfunc = oidvectorhashfast;
 			break;
 		default:
 			elog(FATAL, "type %u not supported as catcache key", keytype);
@@ -177,7 +234,7 @@ set_hash_func(Oid keytype, CCHashFN *hashfunc)
  * Initializes the enum B-tree memory.
  */
 OSysCache *
-o_create_sys_cache(int sys_tree_num, bool is_toast, bool update_if_exist,
+o_create_sys_cache(int sys_tree_num, bool is_toast,
 				   Oid cc_indexoid, int cacheId, int nkeys,
 				   Oid *keytypes, HTAB *fast_cache,
 				   MemoryContext mcxt, OSysCacheFuncs *funcs)
@@ -192,7 +249,6 @@ o_create_sys_cache(int sys_tree_num, bool is_toast, bool update_if_exist,
 	sys_cache = MemoryContextAllocZero(mcxt, sizeof(OSysCache));
 	sys_cache->sys_tree_num = sys_tree_num;
 	sys_cache->is_toast = is_toast;
-	sys_cache->update_if_exist = update_if_exist;
 	sys_cache->cc_indexoid = cc_indexoid;
 	sys_cache->cacheId = cacheId;
 	sys_cache->nkeys = nkeys;
@@ -788,10 +844,6 @@ o_sys_cache_add_if_needed(OSysCache *sys_cache, OSysCacheKey *key, Pointer arg)
 
 	if (found)
 	{
-		/* it's already exist in B-tree */
-		if (sys_cache->update_if_exist)
-			o_sys_cache_update_if_needed(sys_cache, key, arg);
-
 		o_sys_cache_unlock(sys_cache, key, AccessExclusiveLock);
 		return;
 	}
@@ -846,9 +898,6 @@ o_sys_cache_delete(OSysCache *sys_cache, OSysCacheKey *key)
 
 	if (entry == NULL)
 		return false;
-
-	if (sys_cache->funcs->delete_hook)
-		sys_cache->funcs->delete_hook(entry);
 
 	sys_cache_key = (OSysCacheKey *) entry;
 	sys_cache_key->common.deleted = true;
@@ -1022,7 +1071,7 @@ oSysCacheToastGetNextKey(void *key, void *arg)
 
 	key_len = offsetof(OSysCacheKey, keys) + sizeof(Datum) * nkeys;
 
-	nextKeyBound.common = ckey->common;
+	nextKeyBound.common.offset = 0;
 	memcpy(nextKeyBound.key, ckey->key, key_len);
 	nextKeyBound.key->keys[nkeys - 1]++;
 
@@ -1145,12 +1194,34 @@ custom_type_add_if_needed(Oid datoid, Oid typoid, XLogRecPtr insert_lsn)
 			}
 			break;
 		case TYPTYPE_RANGE:
-			o_range_cache_add_if_needed(datoid, typeform->oid, insert_lsn,
-										NULL);
+			{
+				XLogRecPtr	sys_lsn;
+				Oid			sys_datoid;
+				OClassArg	class_arg = {.sys_table = true};
+
+				o_sys_cache_set_datoid_lsn(&sys_lsn, &sys_datoid);
+				o_class_cache_add_if_needed(sys_datoid, RangeRelationId,
+											sys_lsn, (Pointer) &class_arg);
+				o_range_cache_add_if_needed(datoid, typeform->oid, insert_lsn,
+											NULL);
+				o_type_cache_add_if_needed(datoid, typeform->oid, insert_lsn,
+										   NULL);
+				o_range_cache_add_rngsubopc(datoid, typeform->oid, insert_lsn);
+			}
 			break;
 		case TYPTYPE_ENUM:
-			o_enum_cache_add_if_needed(datoid, typeform->oid, insert_lsn,
-									   NULL);
+			{
+				XLogRecPtr	sys_lsn;
+				Oid			sys_datoid;
+				OClassArg	class_arg = {.sys_table = true};
+
+				o_sys_cache_set_datoid_lsn(&sys_lsn, &sys_datoid);
+				o_class_cache_add_if_needed(sys_datoid, EnumRelationId, sys_lsn,
+											(Pointer) &class_arg);
+				o_type_cache_add_if_needed(datoid, typeform->oid, insert_lsn,
+										   NULL);
+				o_enum_cache_add_all(datoid, typeform->oid, insert_lsn);
+			}
 			break;
 		case TYPTYPE_DOMAIN:
 			custom_type_add_if_needed(datoid, typeform->typbasetype,
@@ -1205,12 +1276,80 @@ custom_types_add_all(OTable *o_table, OTableIndex *o_table_index)
 void
 o_composite_type_element_save(Oid datoid, Oid typoid, XLogRecPtr insert_lsn)
 {
-	Oid			opclassoid;
+	Oid			default_btree_opclass;
+	Oid			default_hash_opclass;
 
 	custom_type_add_if_needed(datoid, typoid, insert_lsn);
 	o_type_cache_add_if_needed(datoid, typoid, insert_lsn, NULL);
-	opclassoid = o_type_cache_default_opclass(typoid);
-	o_opclass_cache_add_if_needed(datoid, opclassoid, insert_lsn, NULL);
+	default_btree_opclass = o_type_cache_default_opclass(typoid, BTREE_AM_OID);
+	if (OidIsValid(default_btree_opclass))
+	{
+		XLogRecPtr	sys_lsn;
+		Oid			sys_datoid;
+		OClassArg	class_arg = {.sys_table = true};
+		Oid			btree_opf;
+		Oid			btree_opintype;
+
+		btree_opf = get_opclass_family(default_btree_opclass);
+		btree_opintype = get_opclass_input_type(default_btree_opclass);
+
+		o_sys_cache_set_datoid_lsn(&sys_lsn, &sys_datoid);
+		o_class_cache_add_if_needed(sys_datoid, OperatorClassRelationId,
+									sys_lsn, (Pointer) &class_arg);
+		o_opclass_cache_add_if_needed(datoid, default_btree_opclass,
+									  insert_lsn, NULL);
+		o_class_cache_add_if_needed(sys_datoid,
+									AccessMethodProcedureRelationId, sys_lsn,
+									(Pointer) &class_arg);
+		o_amproc_cache_add_if_needed(datoid, btree_opf, btree_opintype,
+									 btree_opintype, BTORDER_PROC, insert_lsn,
+									 NULL);
+		o_class_cache_add_if_needed(sys_datoid, AccessMethodOperatorRelationId,
+									sys_lsn, (Pointer) &class_arg);
+		o_amop_strat_cache_add_if_needed(datoid, btree_opf, btree_opintype,
+										 btree_opintype, BTLessStrategyNumber,
+										 insert_lsn, NULL);
+		o_amop_strat_cache_add_if_needed(datoid, btree_opf, btree_opintype,
+										 btree_opintype,
+										 BTLessEqualStrategyNumber, insert_lsn,
+										 NULL);
+		o_amop_strat_cache_add_if_needed(datoid, btree_opf, btree_opintype,
+										 btree_opintype, BTEqualStrategyNumber,
+										 insert_lsn, NULL);
+	}
+	default_hash_opclass = o_type_cache_default_opclass(typoid, HASH_AM_OID);
+	if (OidIsValid(default_hash_opclass))
+	{
+		XLogRecPtr	sys_lsn;
+		Oid			sys_datoid;
+		OClassArg	class_arg = {.sys_table = true};
+		Oid			hash_opf;
+		Oid			hash_opintype;
+
+		hash_opf = get_opclass_family(default_hash_opclass);
+		hash_opintype = get_opclass_input_type(default_hash_opclass);
+
+		o_sys_cache_set_datoid_lsn(&sys_lsn, &sys_datoid);
+		o_class_cache_add_if_needed(sys_datoid, OperatorClassRelationId,
+									sys_lsn, (Pointer) &class_arg);
+		o_opclass_cache_add_if_needed(datoid, default_hash_opclass, insert_lsn,
+									  NULL);
+		o_class_cache_add_if_needed(sys_datoid,
+									AccessMethodProcedureRelationId, sys_lsn,
+									(Pointer) &class_arg);
+		o_amproc_cache_add_if_needed(datoid, hash_opf, hash_opintype,
+									 hash_opintype, HASHSTANDARD_PROC,
+									 insert_lsn, NULL);
+		o_amproc_cache_add_if_needed(datoid, hash_opf, hash_opintype,
+									 hash_opintype, HASHEXTENDED_PROC,
+									 insert_lsn, NULL);
+
+		o_class_cache_add_if_needed(sys_datoid, AccessMethodOperatorRelationId,
+									sys_lsn, (Pointer) &class_arg);
+		o_amop_strat_cache_add_if_needed(datoid, hash_opf, hash_opintype,
+										 hash_opintype, HTEqualStrategyNumber,
+										 insert_lsn, NULL);
+	}
 }
 
 static CatCTup *
@@ -1292,12 +1431,16 @@ o_SearchCatCacheInternal_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
 	{
 		case AggregateFnoidIndexId:
 		case AccessMethodOperatorIndexId:
+		case AccessMethodStrategyIndexId:
 		case AccessMethodProcedureIndexId:
 		case AuthIdOidIndexId:
 		case CollationOidIndexId:
-		case OperatorClassRelationId:
+		case EnumOidIndexId:
+		case EnumTypIdLabelIndexId:
+		case OpclassOidIndexId:
 		case OperatorOidIndexId:
 		case ProcedureOidIndexId:
+		case RangeTypidIndexId:
 		case TypeOidIndexId:
 			if (cache->cc_tupdesc)
 				tupdesc = cache->cc_tupdesc;
@@ -1335,6 +1478,26 @@ o_SearchCatCacheInternal_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
 
 				hook_tuple = o_amop_cache_search_htup(tupdesc, amopopr,
 													  amoppurpose, amopfamily);
+			}
+			break;
+		case AccessMethodStrategyIndexId:
+			{
+				Oid			amopfamily;
+				Oid			amoplefttype;
+				Oid			amoprighttype;
+				int16		amopstrategy;
+
+				amopfamily = DatumGetObjectId(v1);
+				amoplefttype = DatumGetObjectId(v2);
+				amoprighttype = DatumGetObjectId(v3);
+				amopstrategy = DatumGetChar(v4);
+
+				Assert(tupdesc);
+
+				hook_tuple =
+					o_amop_strat_cache_search_htup(tupdesc, amopfamily,
+												   amoplefttype, amoprighttype,
+												   amopstrategy);
 			}
 			break;
 		case AccessMethodProcedureIndexId:
@@ -1379,7 +1542,32 @@ o_SearchCatCacheInternal_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
 				hook_tuple = o_collation_cache_search_htup(tupdesc, colloid);
 			}
 			break;
-		case OperatorClassRelationId:
+		case EnumOidIndexId:
+			{
+				Oid			enum_oid;
+
+				enum_oid = DatumGetObjectId(v1);
+
+				Assert(tupdesc);
+
+				hook_tuple = o_enumoid_cache_search_htup(tupdesc, enum_oid);
+			}
+			break;
+		case EnumTypIdLabelIndexId:
+			{
+				Oid			enumtypid;
+				Name		enumlabel;
+
+				enumtypid = DatumGetObjectId(v1);
+				enumlabel = DatumGetName(v1);
+
+				Assert(tupdesc);
+
+				hook_tuple =
+					o_enum_cache_search_htup(tupdesc, enumtypid, enumlabel);
+			}
+			break;
+		case OpclassOidIndexId:
 			{
 				Oid			opclassoid;
 
@@ -1410,6 +1598,17 @@ o_SearchCatCacheInternal_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
 				Assert(tupdesc);
 
 				hook_tuple = o_proc_cache_search_htup(tupdesc, procoid);
+			}
+			break;
+		case RangeTypidIndexId:
+			{
+				Oid			rngtypid;
+
+				rngtypid = DatumGetObjectId(v1);
+
+				Assert(tupdesc);
+
+				hook_tuple = o_range_cache_search_htup(tupdesc, rngtypid);
 			}
 			break;
 		case TypeOidIndexId:
@@ -1520,7 +1719,7 @@ o_SysCacheGetAttr_hook(CatCache *SysCache)
 		case AccessMethodProcedureIndexId:
 		case AuthIdOidIndexId:
 		case CollationOidIndexId:
-		case OperatorClassRelationId:
+		case OpclassOidIndexId:
 		case OperatorOidIndexId:
 		case ProcedureOidIndexId:
 		case TypeOidIndexId:
@@ -1534,6 +1733,33 @@ o_SysCacheGetAttr_hook(CatCache *SysCache)
 	}
 
 	return tupdesc;
+}
+
+static uint32
+o_GetCatCacheHashValue_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
+							Datum v3, Datum v4)
+{
+	OSysCacheKey4 key = {.keys = {v1, v2, v3, v4}};
+	ListCell   *lc;
+	OSysCache  *sys_cache = NULL;
+
+	foreach(lc, sys_caches)
+	{
+		sys_cache = (OSysCache *) lfirst(lc);
+
+		if (sys_cache->cacheId == cache->id)
+			break;
+	}
+	Assert(sys_cache);
+	return compute_hash_value(sys_cache->cc_hashfunc, nkeys,
+							  (OSysCacheKey *) &key);
+}
+
+static void
+o_load_typcache_tupdesc_hook(TypeCacheEntry *typentry)
+{
+	typentry->tupDesc = o_class_cache_search_tupdesc(typentry->typrelid);
+	typentry->tupDesc->tdrefcount++;
 }
 
 static int
@@ -1883,10 +2109,10 @@ o_set_syscache_hooks()
 	SearchCatCacheInternal_hook = o_SearchCatCacheInternal_hook;
 	SearchCatCacheList_hook = o_SearchCatCacheList_hook;
 	SysCacheGetAttr_hook = o_SysCacheGetAttr_hook;
-	enum_cmp_internal_hook = o_enum_cmp_internal_hook;
-	range_cmp_hook = o_range_cmp_hook;
-	type_elements_cmp_hook = o_type_elements_cmp_hook;
-	record_cmp_hook = o_record_cmp_hook;
+	GetCatCacheHashValue_hook = o_GetCatCacheHashValue_hook;
+	GetDefaultOpClass_hook = o_type_cache_default_opclass;
+	load_typcache_tupdesc_hook = o_load_typcache_tupdesc_hook;
+	load_enum_cache_data_hook = o_load_enum_cache_data_hook;
 }
 
 void
@@ -1895,10 +2121,10 @@ o_reset_syscache_hooks()
 	SearchCatCacheInternal_hook = NULL;
 	SearchCatCacheList_hook = NULL;
 	SysCacheGetAttr_hook = NULL;
-	enum_cmp_internal_hook = NULL;
-	range_cmp_hook = NULL;
-	type_elements_cmp_hook = NULL;
-	record_cmp_hook = NULL;
+	GetCatCacheHashValue_hook = NULL;
+	GetDefaultOpClass_hook = NULL;
+	load_typcache_tupdesc_hook = NULL;
+	load_enum_cache_data_hook = NULL;
 	SetUserIdAndSecContext(save_userid, save_sec_context);
 	if (CurrentResourceOwner == my_owner)
 	{
