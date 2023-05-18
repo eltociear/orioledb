@@ -88,11 +88,10 @@ typedef struct
 typedef struct
 {
 	RecoveryMsgHeader header;
-	ORelOids                  oids;
-	OIndexNumber	ix_num;
-	Oid ix_oid;
-	Oid ix_relnode;
-	int		nindices;
+	ORelOids          oids;
+	OIndexNumber	  ix_num;
+	uint32 	          o_table_version;
+	uint32			  current_position;
 } RecoveryOidsMsgIdxBuild;
 
 typedef struct
