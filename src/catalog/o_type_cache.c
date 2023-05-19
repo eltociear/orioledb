@@ -57,7 +57,7 @@ O_SYS_CACHE_INIT_FUNC(type_cache)
 	Oid			keytypes[] = {OIDOID};
 
 	type_cache = o_create_sys_cache(SYS_TREES_TYPE_CACHE, false,
-									TypeOidIndexId, TYPEOID, 1, keytypes,
+									TypeOidIndexId, TYPEOID, 1, keytypes, 0,
 									fastcache, mcxt, &type_cache_funcs);
 }
 

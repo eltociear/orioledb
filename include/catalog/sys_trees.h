@@ -124,5 +124,7 @@ extern bool sys_tree_is_temporary(int tree_num);
 extern bool sys_tree_supports_transactions(int tree_num);
 extern PrintFunc sys_tree_key_print(BTreeDescr *desc);
 extern PrintFunc sys_tree_tup_print(BTreeDescr *desc);
+extern void sys_tree_set_extra(int tree_num, Pointer extra);
+extern Pointer sys_tree_get_extra(int tree_num);
 
 #endif							/* __SYS_TREES_H__ */

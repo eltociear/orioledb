@@ -53,7 +53,25 @@
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 
-Oid			o_sys_cache_search_datoid = InvalidOid;
+typedef struct OSysCacheHashTreeEntry
+{
+	OSysCache  *sys_cache;		/* If NULL only link stored */
+	Pointer		entry;
+} OSysCacheHashTreeEntry;
+typedef struct OSysCacheHashEntry
+{
+	OSysCacheHashKey key;
+	List	   *tree_entries;	/* list of OSysCacheHashTreeEntry-s that used
+								 * because we store entries for all sys caches
+								 * in same fastcache for simpler invalidation
+								 * of dependent objects */
+} OSysCacheHashEntry;
+
+typedef struct OCacheIdMapEntry
+{
+	int			cacheId;
+	OSysCache  *sys_cache;
+} OCacheIdMapEntry;
 
 static Pointer o_sys_cache_get_from_tree(OSysCache *sys_cache,
 										 int nkeys,
@@ -63,9 +81,9 @@ static Pointer o_sys_cache_get_from_toast_tree(OSysCache *sys_cache,
 static bool o_sys_cache_add(OSysCache *sys_cache, OSysCacheKey *key,
 							Pointer entry);
 static bool o_sys_cache_update(OSysCache *sys_cache, Pointer updated_entry);
-static int	o_sys_cache_key_cmp(int nkeys,
+static int	o_sys_cache_key_cmp(OSysCache *sys_cache, int nkeys,
 								OSysCacheKey *key1, OSysCacheKey *key2);
-static void o_sys_cache_keys_to_str(StringInfo buf, int nkeys,
+static void o_sys_cache_keys_to_str(StringInfo buf, OSysCache *sys_cache,
 									OSysCacheKey *key);
 
 static BTreeDescr *oSysCacheToastGetBTreeDesc(void *arg);
@@ -97,9 +115,11 @@ ToastAPI	oSysCacheToastAPI = {
 	.versionCallback = NULL
 };
 
+Oid			o_sys_cache_search_datoid = InvalidOid;
+
 static MemoryContext sys_cache_cxt = NULL;
 static HTAB *sys_cache_fastcache;
-static List *sys_caches = NIL;
+static HTAB *sys_caches;
 
 static ResourceOwner my_owner = NULL;
 static Oid	save_userid;
@@ -124,6 +144,14 @@ o_sys_caches_init(void)
 	sys_cache_fastcache = hash_create("OrioleDB sys_caches fastcache", 8,
 									  &ctl,
 									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(int);
+	ctl.entrysize = sizeof(OCacheIdMapEntry);
+	ctl.hcxt = sys_cache_cxt;
+	sys_caches = hash_create("OrioleDB sys_tree_num to sys_cache map", 8, &ctl,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	o_aggregate_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_amop_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_amop_strat_cache_init(sys_cache_cxt, sys_cache_fastcache);
@@ -138,52 +166,57 @@ o_sys_caches_init(void)
 	o_type_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_collation_cache_init(sys_cache_cxt, sys_cache_fastcache);
 	o_database_cache_init(sys_cache_cxt, sys_cache_fastcache);
+	orioledb_setup_syscache_hooks();
 }
 
 static uint32
-charhashfast(Datum datum)
+charhashfast(OSysCacheKey *key, int att_num)
 {
-	return murmurhash32((int32) DatumGetChar(datum));
+	return murmurhash32((int32) DatumGetChar(key->keys[att_num]));
 }
 
 static uint32
-namehashfast(Datum datum)
+namehashfast(OSysCacheKey *key, int att_num)
 {
-	char	   *key = NameStr(*DatumGetName(datum));
+	char	   *name;
 
-	return hash_any((unsigned char *) key, strlen(key));
+	name = NameStr(*O_KEY_GET_NAME(key, att_num));
+	return hash_any((unsigned char *) name, strlen(name));
 }
 
 static uint32
-int2hashfast(Datum datum)
+int2hashfast(OSysCacheKey *key, int att_num)
 {
-	return murmurhash32((int32) DatumGetInt16(datum));
+	return murmurhash32((int32) DatumGetInt16(key->keys[att_num]));
 }
 
 static uint32
-int4hashfast(Datum datum)
+int4hashfast(OSysCacheKey *key, int att_num)
 {
-	return murmurhash32((int32) DatumGetInt32(datum));
+	return murmurhash32((int32) DatumGetInt32(key->keys[att_num]));
 }
 
 static uint32
-texthashfast(Datum datum)
+texthashfast(OSysCacheKey *key, int att_num)
 {
 	/*
 	 * The use of DEFAULT_COLLATION_OID is fairly arbitrary here.  We just
 	 * want to take the fast "deterministic" path in texteq().
 	 */
-	return DatumGetInt32(DirectFunctionCall1Coll(hashtext, DEFAULT_COLLATION_OID, datum));
+	return DatumGetInt32(DirectFunctionCall1Coll(hashtext,
+												 DEFAULT_COLLATION_OID,
+												 key->keys[att_num]));
 }
 
 static uint32
-oidvectorhashfast(Datum datum)
+oidvectorhashfast(OSysCacheKey *key, int att_num)
 {
-	return DatumGetInt32(DirectFunctionCall1(hashoidvector, datum));
+	return DatumGetInt32(
+						 DirectFunctionCall1(hashoidvector, key->keys[att_num]));
 }
 
 static void
-set_hash_func(Oid keytype, CCHashFN *hashfunc)
+set_hash_func(Oid keytype, O_CCHashFN *hashfunc)
 {
 
 	switch (keytype)
@@ -236,12 +269,12 @@ set_hash_func(Oid keytype, CCHashFN *hashfunc)
 OSysCache *
 o_create_sys_cache(int sys_tree_num, bool is_toast,
 				   Oid cc_indexoid, int cacheId, int nkeys,
-				   Oid *keytypes, HTAB *fast_cache,
+				   Oid *keytypes, int data_len, HTAB *fast_cache,
 				   MemoryContext mcxt, OSysCacheFuncs *funcs)
 {
 	OSysCache  *sys_cache;
-	MemoryContext old_mcxt;
 	int			i;
+	OCacheIdMapEntry *entry;
 
 	Assert(fast_cache);
 	Assert(funcs);
@@ -252,6 +285,8 @@ o_create_sys_cache(int sys_tree_num, bool is_toast,
 	sys_cache->cc_indexoid = cc_indexoid;
 	sys_cache->cacheId = cacheId;
 	sys_cache->nkeys = nkeys;
+	memcpy(sys_cache->keytypes, keytypes, sizeof(Oid) * sys_cache->nkeys);
+	sys_cache->data_len = data_len;
 	sys_cache->fast_cache = fast_cache;
 	sys_cache->mcxt = mcxt;
 	sys_cache->funcs = funcs;
@@ -271,9 +306,9 @@ o_create_sys_cache(int sys_tree_num, bool is_toast,
 		set_hash_func(keytypes[i], &sys_cache->cc_hashfunc[i]);
 	}
 
-	old_mcxt = MemoryContextSwitchTo(mcxt);
-	sys_caches = lappend(sys_caches, sys_cache);
-	MemoryContextSwitchTo(old_mcxt);
+	entry = hash_search(sys_caches, &cacheId, HASH_ENTER, NULL);
+	entry->sys_cache = sys_cache;
+	sys_tree_set_extra(sys_tree_num, (Pointer) sys_cache);
 	return sys_cache;
 }
 
@@ -283,7 +318,7 @@ o_create_sys_cache(int sys_tree_num, bool is_toast,
  * Compute the hash value associated with a given set of lookup keys
  */
 static OSysCacheHashKey
-compute_hash_value(CCHashFN *cc_hashfunc, int nkeys, OSysCacheKey *key)
+compute_hash_value(O_CCHashFN *cc_hashfunc, int nkeys, OSysCacheKey *key)
 {
 	uint32		hashValue = 0;
 	uint32		oneHash;
@@ -291,25 +326,25 @@ compute_hash_value(CCHashFN *cc_hashfunc, int nkeys, OSysCacheKey *key)
 	switch (nkeys)
 	{
 		case 4:
-			oneHash = (cc_hashfunc[3]) (key->keys[3]);
+			oneHash = (cc_hashfunc[3]) (key, 3);
 
 			hashValue ^= oneHash << 24;
 			hashValue ^= oneHash >> 8;
 			/* FALLTHROUGH */
 		case 3:
-			oneHash = (cc_hashfunc[2]) (key->keys[2]);
+			oneHash = (cc_hashfunc[2]) (key, 2);
 
 			hashValue ^= oneHash << 16;
 			hashValue ^= oneHash >> 16;
 			/* FALLTHROUGH */
 		case 2:
-			oneHash = (cc_hashfunc[1]) (key->keys[1]);
+			oneHash = (cc_hashfunc[1]) (key, 1);
 
 			hashValue ^= oneHash << 8;
 			hashValue ^= oneHash >> 24;
 			/* FALLTHROUGH */
 		case 1:
-			oneHash = (cc_hashfunc[0]) (key->keys[0]);
+			oneHash = (cc_hashfunc[0]) (key, 0);
 
 			hashValue ^= oneHash;
 			break;
@@ -371,66 +406,25 @@ orioledb_syscache_hook(Datum arg, int cacheid, uint32 hashvalue)
 void
 orioledb_setup_syscache_hooks(void)
 {
-	ListCell   *lc;
-	List	   *cacheIds = NIL;
+	HASH_SEQ_STATUS hash_seq;
+	OCacheIdMapEntry *entry;
 
-	foreach(lc, sys_caches)
+	hash_seq_init(&hash_seq, sys_caches);
+
+	while ((entry = (OCacheIdMapEntry *) hash_seq_search(&hash_seq)) != NULL)
 	{
-		OSysCache  *sys_cache = (OSysCache *) lfirst(lc);
+		OSysCache  *sys_cache = entry->sys_cache;
 
-		cacheIds = list_append_unique_int(cacheIds, sys_cache->cacheId);
-	}
-	foreach(lc, cacheIds)
-	{
-		int			cacheId = lfirst_int(lc);
-
-		CacheRegisterSyscacheCallback(cacheId, orioledb_syscache_hook,
+		CacheRegisterSyscacheCallback(sys_cache->cacheId,
+									  orioledb_syscache_hook,
 									  PointerGetDatum(NULL));
-	}
-	list_free(cacheIds);
-}
-
-void
-o_sys_caches_add_start()
-{
-	HASHCTL		ctl;
-	ListCell   *lc;
-
-	foreach(lc, sys_caches)
-	{
-		OSysCache  *sys_cache = (OSysCache *) lfirst(lc);
-
-		MemSet(&ctl, 0, sizeof(ctl));
-		ctl.keysize = sizeof(OSysCacheKey4);
-		ctl.entrysize = sizeof(OSysCacheKey4);
-		ctl.hcxt = sys_cache_cxt;
-		Assert(sys_cache->added_hash == NULL);
-		sys_cache->added_hash = hash_create("Orioledb cache add hash", 8,
-											&ctl,
-											HASH_ELEM | HASH_BLOBS |
-											HASH_CONTEXT);
-	}
-}
-
-void
-o_sys_caches_add_finish()
-{
-	ListCell   *lc;
-
-	foreach(lc, sys_caches)
-	{
-		OSysCache  *sys_cache = (OSysCache *) lfirst(lc);
-
-		Assert(sys_cache->added_hash != NULL);
-		hash_destroy(sys_cache->added_hash);
-		sys_cache->added_hash = NULL;
 	}
 }
 
 Pointer
 o_sys_cache_search(OSysCache *sys_cache, int nkeys, OSysCacheKey *key)
 {
-	bool		found;
+	bool		found = false;
 	OSysCacheHashKey cur_fast_cache_key;
 	OSysCacheHashEntry *fast_cache_entry;
 	Pointer		tree_entry;
@@ -450,7 +444,8 @@ o_sys_cache_search(OSysCache *sys_cache, int nkeys, OSysCacheKey *key)
 		sys_cache_key = (OSysCacheKey *) sys_cache->last_fast_cache_entry;
 
 		if (sys_cache_key->common.datoid == key->common.datoid &&
-			o_sys_cache_key_cmp(sys_cache->nkeys, sys_cache_key, key) == 0)
+			o_sys_cache_key_cmp(sys_cache, sys_cache->nkeys, sys_cache_key,
+								key) == 0)
 			return sys_cache->last_fast_cache_entry;
 	}
 
@@ -475,8 +470,8 @@ o_sys_cache_search(OSysCache *sys_cache, int nkeys, OSysCacheKey *key)
 				sys_cache_key = (OSysCacheKey *) tree_entry->entry;
 
 				if (sys_cache_key->common.datoid == key->common.datoid &&
-					o_sys_cache_key_cmp(sys_cache->nkeys, sys_cache_key,
-										key) == 0)
+					o_sys_cache_key_cmp(sys_cache, sys_cache->nkeys,
+										sys_cache_key, key) == 0)
 				{
 					memcpy(&sys_cache->last_fast_cache_key,
 						   &cur_fast_cache_key,
@@ -637,7 +632,7 @@ o_sys_cache_unlock(OSysCache *sys_cache, OSysCacheKey *key, int lockmode)
 	{
 		StringInfo	str = makeStringInfo();
 
-		o_sys_cache_keys_to_str(str, sys_cache->nkeys, key);
+		o_sys_cache_keys_to_str(str, sys_cache, key);
 		elog(ERROR, "Can not release %s catalog cache lock on datoid = %d, "
 			 "key = %s", lockmode == AccessShareLock ? "share" : "exclusive",
 			 key->common.datoid, str->data);
@@ -655,9 +650,49 @@ o_sys_cache_add(OSysCache *sys_cache, OSysCacheKey *key, Pointer entry)
 	bool		inserted;
 	OSysCacheKey *entry_key = (OSysCacheKey *) entry;
 	BTreeDescr *desc = get_sys_tree(sys_cache->sys_tree_num);
+	int			i;
+	bool		allocated = false;
+	OTuple		entry_tuple = {.data = entry};
+	int			key_len = o_btree_len(desc, entry_tuple, OTupleKeyLength);
+	int			entry_len = o_btree_len(desc, entry_tuple, OTupleLength);
 
 	entry_key->common = key->common;
-	memcpy(entry_key->keys, key->keys, sizeof(Datum) * sys_cache->nkeys);
+	entry_key->common.dataLength = 0;
+	for (i = 0; i < sys_cache->nkeys; i++)
+	{
+		switch (sys_cache->keytypes[i])
+		{
+			case NAMEOID:
+				{
+					Pointer		new_entry;
+					int			new_entry_len;
+
+					new_entry_len = entry_len + sizeof(NameData);
+					new_entry = palloc0(new_entry_len);
+					memcpy(new_entry, entry, key_len);
+					memcpy(new_entry + key_len,
+						   NameStr(*DatumGetName(key->keys[i])),
+						   sizeof(NameData));
+					memcpy(new_entry + key_len + sizeof(NameData),
+						   entry + key_len,
+						   entry_len - key_len);
+					entry_key = (OSysCacheKey *) new_entry;
+					entry_key->keys[i] = key_len;
+					entry_key->common.dataLength += sizeof(NameData);
+
+					key_len += sizeof(NameData);
+					if (allocated)
+						pfree(entry);
+					entry = new_entry;
+					allocated = true;
+				}
+				break;
+
+			default:
+				entry_key->keys[i] = key->keys[i];
+				break;
+		}
+	}
 
 	if (!sys_cache->is_toast)
 	{
@@ -699,6 +734,8 @@ o_sys_cache_add(OSysCache *sys_cache, OSysCacheKey *key, Pointer entry)
 		finish_autonomous_transaction(&state);
 		pfree(data);
 	}
+	if (allocated)
+		pfree(entry);
 	return inserted;
 }
 
@@ -826,21 +863,8 @@ o_sys_cache_add_if_needed(OSysCache *sys_cache, OSysCacheKey *key, Pointer arg)
 
 	o_sys_cache_lock(sys_cache, key, AccessExclusiveLock);
 
-	if (sys_cache->added_hash)
-	{
-		OSysCacheKey4 hash_key = {0};
-
-		hash_key.common.datoid = key->common.datoid;
-		memcpy(hash_key.keys, key->keys, sizeof(Datum) * sys_cache->nkeys);
-		hash_search(sys_cache->added_hash, &hash_key, HASH_ENTER,
-					&found);
-	}
-
-	if (!found)
-	{
-		entry = o_sys_cache_search(sys_cache, sys_cache->nkeys, key);
-		found = entry != NULL;
-	}
+	entry = o_sys_cache_search(sys_cache, sys_cache->nkeys, key);
+	found = entry != NULL;
 
 	if (found)
 	{
@@ -986,11 +1010,13 @@ o_sys_cache_delete_by_lsn(OSysCache *sys_cache, XLogRecPtr lsn)
 void
 o_sys_caches_delete_by_lsn(XLogRecPtr checkPointRedo)
 {
-	ListCell   *lc;
+	HASH_SEQ_STATUS hash_seq;
+	OCacheIdMapEntry *entry;
 
-	foreach(lc, sys_caches)
+	hash_seq_init(&hash_seq, sys_caches);
+	while ((entry = (OCacheIdMapEntry *) hash_seq_search(&hash_seq)) != NULL)
 	{
-		OSysCache  *sys_cache = (OSysCache *) lfirst(lc);
+		OSysCache  *sys_cache = entry->sys_cache;
 
 		o_sys_cache_delete_by_lsn(sys_cache, checkPointRedo);
 	}
@@ -1250,27 +1276,18 @@ custom_types_add_all(OTable *o_table, OTableIndex *o_table_index)
 	XLogRecPtr	cur_lsn;
 	int			expr_field = 0;
 
-	o_sys_caches_add_start();
-	PG_TRY();
+	o_sys_cache_set_datoid_lsn(&cur_lsn, NULL);
+	for (cur_field = 0; cur_field < o_table_index->nfields; cur_field++)
 	{
-		o_sys_cache_set_datoid_lsn(&cur_lsn, NULL);
-		for (cur_field = 0; cur_field < o_table_index->nfields; cur_field++)
-		{
-			int			attnum = o_table_index->fields[cur_field].attnum;
-			Oid			typid;
+		int			attnum = o_table_index->fields[cur_field].attnum;
+		Oid			typid;
 
-			if (attnum != EXPR_ATTNUM)
-				typid = o_table->fields[attnum].typid;
-			else
-				typid = o_table_index->exprfields[expr_field++].typid;
-			custom_type_add_if_needed(o_table->oids.datoid, typid, cur_lsn);
-		}
+		if (attnum != EXPR_ATTNUM)
+			typid = o_table->fields[attnum].typid;
+		else
+			typid = o_table_index->exprfields[expr_field++].typid;
+		custom_type_add_if_needed(o_table->oids.datoid, typid, cur_lsn);
 	}
-	PG_FINALLY();
-	{
-		o_sys_caches_add_finish();
-	}
-	PG_END_TRY();
 }
 
 void
@@ -1740,18 +1757,11 @@ o_GetCatCacheHashValue_hook(CatCache *cache, int nkeys, Datum v1, Datum v2,
 							Datum v3, Datum v4)
 {
 	OSysCacheKey4 key = {.keys = {v1, v2, v3, v4}};
-	ListCell   *lc;
-	OSysCache  *sys_cache = NULL;
+	OCacheIdMapEntry *entry;
 
-	foreach(lc, sys_caches)
-	{
-		sys_cache = (OSysCache *) lfirst(lc);
-
-		if (sys_cache->cacheId == cache->id)
-			break;
-	}
-	Assert(sys_cache);
-	return compute_hash_value(sys_cache->cc_hashfunc, nkeys,
+	entry = hash_search(sys_caches, &cache->id, HASH_ENTER, NULL);
+	Assert(entry);
+	return compute_hash_value(entry->sys_cache->cc_hashfunc, nkeys,
 							  (OSysCacheKey *) &key);
 }
 
@@ -1763,18 +1773,72 @@ o_load_typcache_tupdesc_hook(TypeCacheEntry *typentry)
 }
 
 static int
-o_sys_cache_key_cmp(int nkeys, OSysCacheKey *key1, OSysCacheKey *key2)
+o_sys_cache_key_cmp(OSysCache *sys_cache, int nkeys, OSysCacheKey *key1,
+					OSysCacheKey *key2)
 {
 	int			i;
 	int			cmp = 0;
 
 	for (i = 0; i < nkeys; i++)
 	{
-		cmp = key1->keys[i] - key2->keys[i];
+		Oid			keytype = sys_cache->keytypes[i];
+
+		switch (keytype)
+		{
+			case NAMEOID:
+				{
+					char	   *arg1;
+					char	   *arg2;
+
+					arg1 = NameStr(*O_KEY_GET_NAME(key1, i));
+					arg2 = NameStr(*O_KEY_GET_NAME(key2, i));
+					cmp = strncmp(arg1, arg2, NAMEDATALEN);
+				}
+				break;
+			default:
+				cmp = key1->keys[i] - key2->keys[i];
+				break;
+		}
 		if (cmp != 0)
 			break;
 	}
 	return cmp;
+}
+
+static inline OSysCache *
+get_o_sys_cache(int sys_tree_num)
+{
+	return (OSysCache *) sys_tree_get_extra(sys_tree_num);
+}
+
+int
+o_sys_cache_key_length(BTreeDescr *desc, OTuple tuple)
+{
+	Pointer		data = tuple.data;
+	OSysCacheKeyCommon *common;
+	OSysCache  *sys_cache;
+	int			key_len;
+
+	sys_cache = get_o_sys_cache(desc->oids.reloid);
+	key_len = offsetof(OSysCacheKey, keys) + sizeof(Datum) * sys_cache->nkeys;
+
+	common = (OSysCacheKeyCommon *) data;
+
+	return key_len + common->dataLength;
+}
+
+int
+o_sys_cache_tup_length(BTreeDescr *desc, OTuple tuple)
+{
+	OSysCache  *sys_cache;
+	int			key_len;
+	int			data_len;
+
+	key_len = o_sys_cache_key_length(desc, tuple);
+	sys_cache = get_o_sys_cache(desc->oids.reloid);
+	data_len = sys_cache->data_len;
+
+	return key_len + data_len;
 }
 
 /*
@@ -1795,8 +1859,10 @@ o_sys_cache_cmp(BTreeDescr *desc, void *p1, BTreeKeyType k1, void *p2,
 	bool		lsn_cmp = true;
 	int			nkeys;
 	int			cmp;
+	OSysCache  *sys_cache;
 
-	nkeys = nkeys_for_desc(desc);
+	sys_cache = get_o_sys_cache(desc->oids.reloid);
+	nkeys = sys_cache->nkeys;
 
 	if (k1 == BTreeKeyBound)
 	{
@@ -1823,7 +1889,7 @@ o_sys_cache_cmp(BTreeDescr *desc, void *p1, BTreeKeyType k1, void *p2,
 	if (key1->common.datoid != key2->common.datoid)
 		return key1->common.datoid < key2->common.datoid ? -1 : 1;
 
-	cmp = o_sys_cache_key_cmp(nkeys, key1, key2);
+	cmp = o_sys_cache_key_cmp(sys_cache, nkeys, key1, key2);
 	if (cmp != 0)
 		return cmp;
 
@@ -1835,16 +1901,30 @@ o_sys_cache_cmp(BTreeDescr *desc, void *p1, BTreeKeyType k1, void *p2,
 }
 
 static void
-o_sys_cache_keys_to_str(StringInfo buf, int nkeys, OSysCacheKey *key)
+o_sys_cache_keys_to_str(StringInfo buf, OSysCache *sys_cache,
+						OSysCacheKey *key)
 {
 	int			i;
 
 	appendStringInfo(buf, "(");
-	for (i = 0; i < nkeys; i++)
+	for (i = 0; i < sys_cache->nkeys; i++)
 	{
 		if (i != 0)
 			appendStringInfo(buf, ", ");
-		appendStringInfo(buf, "%lu", key->keys[i]);
+		switch (sys_cache->keytypes[i])
+		{
+			case NAMEOID:
+				{
+					char	   *name = NameStr(*O_KEY_GET_NAME(key, i));
+
+					appendStringInfo(buf, "\"%s\"", name);
+				}
+				break;
+
+			default:
+				appendStringInfo(buf, "%lu", key->keys[i]);
+				break;
+		}
 	}
 	appendStringInfo(buf, ")");
 }
@@ -1865,9 +1945,54 @@ o_sys_cache_key_print(BTreeDescr *desc, StringInfo buf, OTuple key_tup,
 	off = (uint32) key->common.lsn;
 
 	appendStringInfo(buf, "(%u, ", key->common.datoid);
-	o_sys_cache_keys_to_str(buf, nkeys_for_desc(desc), key);
+	o_sys_cache_keys_to_str(buf, get_o_sys_cache(desc->oids.reloid), key);
 	appendStringInfo(buf, ", %X/%X, %c)", id, off,
 					 key->common.deleted ? 'Y' : 'N');
+}
+
+static void
+o_sys_cache_keys_push_to_jsonb_state(OSysCache *sys_cache,
+									 OSysCacheKey *key,
+									 JsonbParseState **state)
+{
+	int			i;
+
+	jsonb_push_key(state, "keys");
+	(void) pushJsonbValue(state, WJB_BEGIN_ARRAY, NULL);
+	for (i = 0; i < sys_cache->nkeys; i++)
+	{
+		switch (sys_cache->keytypes[i])
+		{
+			case NAMEOID:
+				{
+					JsonbValue	jval;
+					char	   *name;
+
+					name = NameStr(*O_KEY_GET_NAME(key, i));
+
+					jval.type = jbvString;
+					jval.val.string.len = strlen(name);
+					jval.val.string.val = name;
+					(void) pushJsonbValue(state, WJB_ELEM, &jval);
+				}
+				break;
+
+			default:
+				{
+					Datum		res;
+					JsonbValue	jval;
+
+					res = DirectFunctionCall1(int8_numeric,
+											  Int64GetDatum(key->keys[i]));
+
+					jval.type = jbvNumeric;
+					jval.val.numeric = DatumGetNumeric(res);
+					(void) pushJsonbValue(state, WJB_ELEM, &jval);
+				}
+				break;
+		}
+	}
+	(void) pushJsonbValue(state, WJB_END_ARRAY, NULL);
 }
 
 static void
@@ -1881,8 +2006,8 @@ o_sys_cache_key_push_to_jsonb_state(BTreeDescr *desc, OSysCacheKey *key,
 	jsonb_push_bool_key(state, "deleted", key->common.deleted);
 
 	str = makeStringInfo();
-	o_sys_cache_keys_to_str(str, nkeys_for_desc(desc), key);
-	jsonb_push_string_key(state, "keys", str->data);
+	o_sys_cache_keys_push_to_jsonb_state(get_o_sys_cache(desc->oids.reloid),
+										 key, state);
 	pfree(str->data);
 	pfree(str);
 }

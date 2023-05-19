@@ -808,17 +808,8 @@ o_collect_funcexpr(Node *node)
 	if (!node)
 		return;
 
-	o_sys_caches_add_start();
-	PG_TRY();
-	{
-		expression_tree_walker(o_wrap_top_funcexpr(node), o_collect_function,
-							   NULL);
-	}
-	PG_FINALLY();
-	{
-		o_sys_caches_add_finish();
-	}
-	PG_END_TRY();
+	expression_tree_walker(o_wrap_top_funcexpr(node), o_collect_function,
+						   NULL);
 }
 
 void

@@ -53,7 +53,7 @@ O_SYS_CACHE_INIT_FUNC(amproc_cache)
 
 	amproc_cache = o_create_sys_cache(SYS_TREES_AMPROC_CACHE, false,
 									  AccessMethodProcedureIndexId, AMPROCNUM,
-									  4, keytypes, fastcache, mcxt,
+									  4, keytypes, 0, fastcache, mcxt,
 									  &amproc_cache_funcs);
 }
 

@@ -83,7 +83,7 @@ O_SYS_CACHE_INIT_FUNC(aggregate_cache)
 
 	aggregate_cache = o_create_sys_cache(SYS_TREES_AGG_CACHE, true,
 										 AggregateFnoidIndexId, AGGFNOID, 1,
-										 keytypes, fastcache, mcxt,
+										 keytypes, 0, fastcache, mcxt,
 										 &aggregate_cache_funcs);
 }
 

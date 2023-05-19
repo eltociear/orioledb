@@ -70,7 +70,7 @@ O_SYS_CACHE_INIT_FUNC(collation_cache)
 
 	collation_cache = o_create_sys_cache(SYS_TREES_COLLATION_CACHE, true,
 										 CollationOidIndexId, COLLOID, 1,
-										 keytypes, fastcache, mcxt,
+										 keytypes, 0, fastcache, mcxt,
 										 &collation_cache_funcs);
 }
 

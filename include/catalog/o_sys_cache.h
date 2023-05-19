@@ -48,26 +48,13 @@ extern Oid	o_sys_cache_search_datoid;
 typedef uint32 OSysCacheHashKey;	/* GetSysCacheHashValue result type */
 
 typedef struct OSysCache OSysCache;
-typedef struct OSysCacheHashTreeEntry
-{
-	OSysCache  *sys_cache;		/* If NULL only link stored */
-	Pointer		entry;
-} OSysCacheHashTreeEntry;
-typedef struct OSysCacheHashEntry
-{
-	OSysCacheHashKey key;
-	List	   *tree_entries;	/* list of OSysCacheHashTreeEntry-s that used
-								 * because we store entries for all sys caches
-								 * in same fastcache for simpler invalidation
-								 * of dependent objects */
-} OSysCacheHashEntry;
-
 
 typedef struct OSysCacheKeyCommon
 {
 	Oid			datoid;
 	XLogRecPtr	lsn;
 	bool		deleted;
+	int			dataLength;
 } OSysCacheKeyCommon;
 
 typedef struct OSysCacheKey
@@ -75,6 +62,10 @@ typedef struct OSysCacheKey
 	OSysCacheKeyCommon common;
 	Datum		keys[FLEXIBLE_ARRAY_MEMBER];
 } OSysCacheKey;
+
+#define O_KEY_GET_NAME(key, att_num) (((key)->common.dataLength == 0) ? \
+		DatumGetName((key)->keys[att_num]) : \
+		((Name) (((Pointer) (key)) + (key)->keys[att_num])))
 
 typedef struct OSysCacheBound
 {
@@ -225,6 +216,8 @@ typedef struct OSysCacheFuncs
 											Size length);
 } OSysCacheFuncs;
 
+typedef uint32 (*O_CCHashFN) (OSysCacheKey *key, int att_num);
+
 typedef struct OSysCache
 {
 	int			sys_tree_num;
@@ -232,11 +225,12 @@ typedef struct OSysCache
 	Oid			cc_indexoid;
 	int			cacheId;
 	int			nkeys;
+	Oid			keytypes[CATCACHE_MAXKEYS];
+	int			data_len;
 	MemoryContext mcxt;			/* context where stored entries from fast
 								 * cache */
 	HTAB	   *fast_cache;		/* contains OSysCacheHashEntry-s */
-	HTAB	   *added_hash;		/* contains OSysCacheKey4-s */
-	CCHashFN	cc_hashfunc[CATCACHE_MAXKEYS];
+	O_CCHashFN	cc_hashfunc[CATCACHE_MAXKEYS];
 	OSysCacheHashKey last_fast_cache_key;
 	Pointer		last_fast_cache_entry;
 	OSysCacheFuncs *funcs;
@@ -252,6 +246,7 @@ extern OSysCache *o_create_sys_cache(int sys_tree_num, bool is_toast,
 									 int cacheId,	/* cacheinfo array index */
 									 int nkeys,
 									 Oid *keytypes,
+									 int data_len,
 									 HTAB *fast_cache,
 									 MemoryContext mcxt,
 									 OSysCacheFuncs *funcs);
@@ -270,9 +265,9 @@ extern void custom_type_add_if_needed(Oid datoid, Oid typoid,
 extern void o_sys_caches_delete_by_lsn(XLogRecPtr checkPointRedo);
 
 extern void orioledb_setup_syscache_hooks(void);
-extern void o_sys_caches_add_start(void);
-extern void o_sys_caches_add_finish(void);
 
+extern int	o_sys_cache_key_length(BTreeDescr *desc, OTuple tuple);
+extern int	o_sys_cache_tup_length(BTreeDescr *desc, OTuple tuple);
 extern int	o_sys_cache_cmp(BTreeDescr *desc, void *p1, BTreeKeyType k1,
 							void *p2, BTreeKeyType k2);
 extern void o_sys_cache_key_print(BTreeDescr *desc, StringInfo buf,
@@ -389,11 +384,17 @@ extern void o_reset_syscache_hooks(void);
 extern bool o_is_syscache_hooks_set(void);
 
 /* o_enum_cache.c */
+
+typedef struct OEnumData
+{
+	Oid			oid;
+	float4		enumsortorder;
+} OEnumData;
+
 typedef struct
 {
 	OSysCacheKey2 key;
-	Oid			oid;
-	float4		enumsortorder;
+	OEnumData	data;
 } OEnum;
 
 typedef struct

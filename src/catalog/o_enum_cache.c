@@ -86,10 +86,11 @@ static OSysCacheFuncs enumoid_cache_funcs =
 O_SYS_CACHE_INIT_FUNC(enum_cache)
 {
 	Oid			keytypes[] = {OIDOID, NAMEOID};
+	int			data_len = sizeof(OEnumData);
 
 	enum_cache = o_create_sys_cache(SYS_TREES_ENUM_CACHE, false,
 									EnumTypIdLabelIndexId, ENUMTYPOIDNAME, 2,
-									keytypes, fastcache, mcxt,
+									keytypes, data_len, fastcache, mcxt,
 									&enum_cache_funcs);
 }
 
@@ -98,7 +99,7 @@ O_SYS_CACHE_INIT_FUNC(enumoid_cache)
 	Oid			keytypes[] = {OIDOID};
 
 	enumoid_cache = o_create_sys_cache(SYS_TREES_ENUMOID_CACHE, false,
-									   EnumOidIndexId, ENUMOID, 1, keytypes,
+									   EnumOidIndexId, ENUMOID, 1, keytypes, 0,
 									   fastcache, mcxt, &enumoid_cache_funcs);
 }
 
@@ -163,8 +164,8 @@ o_enum_cache_fill_entry(Pointer *entry_ptr, OSysCacheKey *key, Pointer arg)
 		*entry_ptr = (Pointer) o_enum;
 	}
 
-	o_enum->oid = enumform->oid;
-	o_enum->enumsortorder = enumform->enumsortorder;
+	o_enum->data.oid = enumform->oid;
+	o_enum->data.enumsortorder = enumform->enumsortorder;
 
 	MemoryContextSwitchTo(prev_context);
 	ReleaseSysCache(enumtup);
@@ -222,24 +223,16 @@ void
 o_enum_cache_tup_print(BTreeDescr *desc, StringInfo buf, OTuple tup,
 					   Pointer arg)
 {
-	OEnum	   *o_enum = (OEnum *) tup.data;
 	OSysCacheKey *key = (OSysCacheKey *) tup.data;
-	uint32		id,
-				off;
+	OEnumData  *o_enum_data;
 
+	o_enum_data = (OEnumData *) (tup.data + offsetof(OEnum, data) +
+								 key->common.dataLength);
 	appendStringInfo(buf, "(");
-
-	/* Decode ID and offset */
-	id = (uint32) (key->common.lsn >> 32);
-	off = (uint32) key->common.lsn;
-
-	appendStringInfo(buf,
-					 "(%u, (%lu, \"%s\"), %X/%X, %c), oid: %u, enumsortorder: "
-					 "%f)",
-					 key->common.datoid, key->keys[0],
-					 DatumGetName(key->keys[1])->data, id, off,
-					 key->common.deleted ? 'Y' : 'N', o_enum->oid,
-					 o_enum->enumsortorder);
+	o_sys_cache_key_print(desc, buf, tup, arg);
+	appendStringInfo(buf, ", oid: %u, enumsortorder: %f)",
+					 o_enum_data->oid,
+					 o_enum_data->enumsortorder);
 }
 
 /*
@@ -278,6 +271,7 @@ o_enum_cache_delete_all(Oid datoid, Oid enum_oid)
 												 BTreeKeyBound, true,
 												 NULL);
 		OEnum	   *o_enum = (OEnum *) tup.data;
+		OEnumData  *o_enum_data;
 
 		if (O_TUPLE_IS_NULL(tup))
 			break;
@@ -285,8 +279,12 @@ o_enum_cache_delete_all(Oid datoid, Oid enum_oid)
 		if (o_enum->key.common.lsn > key.common.lsn)
 			break;
 
-		o_enum_cache_delete(datoid, o_enum->key.keys[0], o_enum->key.keys[1]);
-		o_enumoid_cache_delete(datoid, o_enum->oid);
+		o_enum_data =
+			(OEnumData *) (((Pointer) o_enum) + offsetof(OEnum, data) +
+						   o_enum->key.common.dataLength);
+		o_enum_cache_delete(datoid, o_enum->key.keys[0],
+							NameGetDatum(O_KEY_GET_NAME(&o_enum->key, 1)));
+		o_enumoid_cache_delete(datoid, o_enum_data->oid);
 	} while (true);
 }
 
@@ -326,6 +324,7 @@ o_enum_cache_search_htup(TupleDesc tupdesc, Oid enumtypid, Name enumlabel)
 	Datum		values[Natts_pg_enum] = {0};
 	bool		nulls[Natts_pg_enum] = {0};
 	OEnum	   *o_enum;
+	OEnumData  *o_enum_data;
 
 	o_sys_cache_set_datoid_lsn(&cur_lsn, &datoid);
 	o_enum = o_enum_cache_search(datoid, enumtypid, NameGetDatum(enumlabel),
@@ -334,12 +333,15 @@ o_enum_cache_search_htup(TupleDesc tupdesc, Oid enumtypid, Name enumlabel)
 	{
 		NameData	enumlabel;
 
+		o_enum_data =
+			(OEnumData *) (((Pointer) o_enum) + offsetof(OEnum, data) +
+						   o_enum->key.common.dataLength);
 		values[Anum_pg_enum_enumtypid - 1] = o_enum->key.keys[0];
 		namestrcpy(&enumlabel, DatumGetName(o_enum->key.keys[0])->data);
 		values[Anum_pg_enum_enumlabel - 1] = NameGetDatum(&enumlabel);
-		values[Anum_pg_enum_oid - 1] = ObjectIdGetDatum(o_enum->oid);
+		values[Anum_pg_enum_oid - 1] = ObjectIdGetDatum(o_enum_data->oid);
 		values[Anum_pg_enum_enumsortorder - 1] =
-			Float4GetDatum(o_enum->enumsortorder);
+			Float4GetDatum(o_enum_data->enumsortorder);
 		result = heap_form_tuple(tupdesc, values, nulls);
 	}
 	return result;
@@ -413,6 +415,7 @@ o_load_enum_cache_data_hook(TypeCacheEntry *tcache)
 												 BTreeKeyBound, true,
 												 NULL);
 		OEnum	   *o_enum = (OEnum *) tup.data;
+		OEnumData  *o_enum_data;
 
 		if (O_TUPLE_IS_NULL(tup))
 			break;
@@ -425,8 +428,11 @@ o_load_enum_cache_data_hook(TypeCacheEntry *tcache)
 			maxitems *= 2;
 			items = (EnumItem *) repalloc(items, sizeof(EnumItem) * maxitems);
 		}
-		items[numitems].enum_oid = o_enum->oid;
-		items[numitems].sort_order = o_enum->enumsortorder;
+		o_enum_data =
+			(OEnumData *) (((Pointer) o_enum) + offsetof(OEnum, data) +
+						   o_enum->key.common.dataLength);
+		items[numitems].enum_oid = o_enum_data->oid;
+		items[numitems].sort_order = o_enum_data->enumsortorder;
 		numitems++;
 	} while (true);
 

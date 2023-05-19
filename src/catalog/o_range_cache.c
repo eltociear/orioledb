@@ -63,7 +63,7 @@ O_SYS_CACHE_INIT_FUNC(range_cache)
 
 	range_cache = o_create_sys_cache(SYS_TREES_RANGE_CACHE, false,
 									 RangeTypidIndexId, RANGETYPE, 1, keytypes,
-									 fastcache, mcxt, &range_cache_funcs);
+									 0, fastcache, mcxt, &range_cache_funcs);
 }
 
 void

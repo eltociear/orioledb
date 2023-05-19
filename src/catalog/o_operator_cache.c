@@ -54,7 +54,7 @@ O_SYS_CACHE_INIT_FUNC(operator_cache)
 
 	operator_cache = o_create_sys_cache(SYS_TREES_OPER_CACHE, false,
 										OperatorOidIndexId, OPEROID, 1,
-										keytypes, fastcache, mcxt,
+										keytypes, 0, fastcache, mcxt,
 										&operator_cache_funcs);
 }
 

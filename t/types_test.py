@@ -33,12 +33,13 @@ class TypesTest(BaseTest):
 		return self.sys_tree_nums.get(name, 9999)
 
 	def check_total_deleted(self, node, sys_tree_name, total, deleted):
-		self.assertEqual(
-			node.execute('postgres',
-						 'SELECT orioledb_sys_tree_rows(' +
-						 str(self.sys_tree_name_to_num(sys_tree_name)) +
-						 ');')[0][0],
-			"(%d,%d)" % (total, deleted))
+		rows = node.execute("""
+			SELECT k->'tupHdr'->'deleted', COUNT(k)
+				FROM orioledb_sys_tree_rows(%d) k GROUP BY 1 ORDER BY 1;
+		""" % self.sys_tree_name_to_num(sys_tree_name))
+		cur_total = sum(x[1] for x in rows)
+		cur_deleted = next((x[1] for x in rows if x[0] == True), 0)
+		self.assertEqual((cur_total, cur_deleted), (total, deleted))
 
 	def test_enum_index_recovery(self):
 		enum_amount = 0
@@ -84,6 +85,70 @@ class TypesTest(BaseTest):
 		# deleted records in o_enum_cache physically deleted during checkpoint
 		# performed after recovery
 		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 4)
+		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 4)
+		node.stop()
+
+	def test_enum_cache_namedata_in_key(self):
+		enum_amount = 0
+		enumoid_amount = 0
+		node = self.node
+		node.start()
+
+		node.safe_psql('postgres',"""
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+			CREATE TYPE o_happiness AS ENUM ('happy', 'very happy',
+											 'ecstatic');
+
+			CREATE TABLE o_holidays (
+				num_weeks integer NOT NULL,
+				happiness o_happiness NOT NULL,
+				PRIMARY KEY (happiness)
+			) USING orioledb;
+
+			ALTER TYPE o_happiness ADD VALUE 'sad' BEFORE 'very happy';
+		""")
+
+		node.safe_psql('postgres',"""
+			INSERT INTO o_holidays(num_weeks, happiness)
+				VALUES (2, 'happy');
+			INSERT INTO o_holidays(num_weeks, happiness)
+				VALUES (4, 'sad');
+			INSERT INTO o_holidays(num_weeks, happiness)
+				VALUES (6, 'very happy');
+			INSERT INTO o_holidays(num_weeks, happiness)
+				VALUES (8, 'ecstatic');
+		""")
+
+		node.safe_psql("""
+			ALTER TYPE o_happiness RENAME VALUE 'sad' TO 'depressed';
+		""")
+
+		enum_amount += 5 # 'happy', 'sad', 'very happy', 'ecstatic', 'depressed'
+		enumoid_amount += 4 # 'happy', 'depressed', 'very happy', 'ecstatic'
+		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 0)
+		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 0)
+		node.safe_psql('postgres', "DROP TABLE o_holidays;")
+		node.safe_psql('postgres', "DROP TYPE o_happiness;")
+		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 0)
+		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 0)
+		self.assertEqual(['depressed', 'ecstatic', 'happy',
+		    			  'sad', 'very happy'],
+						 [x[0] for x in node.execute("""
+							SELECT k->'key'->'keys'->1
+								FROM orioledb_sys_tree_rows(%d) k ORDER BY 1;
+						 """ % self.sys_tree_name_to_num('ENUM_CACHE'))])
+		node.stop(['-m', 'immediate'])
+
+		node.start()
+		self.assertEqual(['depressed', 'ecstatic', 'happy',
+		    			  'sad', 'very happy'],
+						 [x[0] for x in node.execute("""
+							SELECT k->'key'->'keys'->1
+								FROM orioledb_sys_tree_rows(%d) k ORDER BY 1;
+						 """ % self.sys_tree_name_to_num('ENUM_CACHE'))])
+		# deleted records in o_enum_cache physically deleted during checkpoint
+		# performed after recovery
+		self.check_total_deleted(node, 'ENUM_CACHE', enum_amount, 5)
 		self.check_total_deleted(node, 'ENUMOID_CACHE', enumoid_amount, 4)
 		node.stop()
 

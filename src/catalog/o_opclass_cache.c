@@ -66,7 +66,8 @@ O_SYS_CACHE_INIT_FUNC(opclass_cache)
 
 	opclass_cache = o_create_sys_cache(SYS_TREES_OPCLASS_CACHE, false,
 									   OpclassOidIndexId, CLAOID, 1, keytypes,
-									   fastcache, mcxt, &opclass_cache_funcs);
+									   0, fastcache, mcxt,
+									   &opclass_cache_funcs);
 }
 
 static void
@@ -132,59 +133,46 @@ o_opclass_cache_add_table(OTable *o_table)
 	o_sys_cache_set_datoid_lsn(&cur_lsn, NULL);
 	datoid = o_table->oids.datoid;
 
-	o_sys_caches_add_start();
-	PG_TRY();
-	{
-		/*
-		 * Inserts opclasses for TOAST index.
-		 */
-		o_opclass_cache_add_if_needed(datoid,
-									  GetDefaultOpClass(INT2OID,
-														BTREE_AM_OID),
-									  cur_lsn, NULL);
-		add_btree_opclass(datoid, GetDefaultOpClass(INT2OID, BTREE_AM_OID),
-						  cur_lsn);
-		o_opclass_cache_add_if_needed(datoid,
-									  GetDefaultOpClass(INT4OID,
-														BTREE_AM_OID),
-									  cur_lsn, NULL);
-		add_btree_opclass(datoid, GetDefaultOpClass(INT4OID, BTREE_AM_OID),
-						  cur_lsn);
+	/*
+	 * Inserts opclasses for TOAST index.
+	 */
+	o_opclass_cache_add_if_needed(datoid,
+								  GetDefaultOpClass(INT2OID, BTREE_AM_OID),
+								  cur_lsn, NULL);
+	add_btree_opclass(datoid, GetDefaultOpClass(INT2OID, BTREE_AM_OID),
+					  cur_lsn);
+	o_opclass_cache_add_if_needed(datoid,
+								  GetDefaultOpClass(INT4OID, BTREE_AM_OID),
+								  cur_lsn, NULL);
+	add_btree_opclass(datoid, GetDefaultOpClass(INT4OID, BTREE_AM_OID),
+					  cur_lsn);
 
-		/*
-		 * Inserts opclass for default index if there is no unique index.
-		 */
-		if (o_table->nindices == 0 ||
-			o_table->indices[0].type == oIndexRegular)
+	/*
+	 * Inserts opclass for default index if there is no unique index.
+	 */
+	if (o_table->nindices == 0 || o_table->indices[0].type == oIndexRegular)
+	{
+		o_opclass_cache_add_if_needed(datoid,
+									  GetDefaultOpClass(TIDOID, BTREE_AM_OID),
+									  cur_lsn, NULL);
+		add_btree_opclass(datoid, GetDefaultOpClass(TIDOID, BTREE_AM_OID),
+						  cur_lsn);
+	}
+
+	for (cur_ix = 0; cur_ix < o_table->nindices; cur_ix++)
+	{
+		OTableIndex *index = &o_table->indices[cur_ix];
+		int			cur_field;
+
+		for (cur_field = 0; cur_field < index->nkeyfields; cur_field++)
 		{
 			o_opclass_cache_add_if_needed(datoid,
-										  GetDefaultOpClass(TIDOID,
-															BTREE_AM_OID),
+										  index->fields[cur_field].opclass,
 										  cur_lsn, NULL);
-			add_btree_opclass(datoid, GetDefaultOpClass(TIDOID, BTREE_AM_OID),
+			add_btree_opclass(datoid, index->fields[cur_field].opclass,
 							  cur_lsn);
 		}
-
-		for (cur_ix = 0; cur_ix < o_table->nindices; cur_ix++)
-		{
-			OTableIndex *index = &o_table->indices[cur_ix];
-			int			cur_field;
-
-			for (cur_field = 0; cur_field < index->nkeyfields; cur_field++)
-			{
-				o_opclass_cache_add_if_needed(datoid,
-											  index->fields[cur_field].opclass,
-											  cur_lsn, NULL);
-				add_btree_opclass(datoid, index->fields[cur_field].opclass,
-								  cur_lsn);
-			}
-		}
 	}
-	PG_FINALLY();
-	{
-		o_sys_caches_add_finish();
-	}
-	PG_END_TRY();
 }
 
 /*

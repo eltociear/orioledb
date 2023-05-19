@@ -66,7 +66,7 @@ O_SYS_CACHE_INIT_FUNC(amop_cache)
 
 	amop_cache = o_create_sys_cache(SYS_TREES_AMOP_CACHE, false,
 									AccessMethodOperatorIndexId, AMOPOPID, 3,
-									keytypes, fastcache, mcxt,
+									keytypes, 0, fastcache, mcxt,
 									&amop_cache_funcs);
 }
 
@@ -79,8 +79,9 @@ O_SYS_CACHE_INIT_FUNC(amop_strat_cache)
 
 	amop_strat_cache = o_create_sys_cache(SYS_TREES_AMOP_STRAT_CACHE, false,
 										  AccessMethodStrategyIndexId,
-										  AMOPSTRATEGY, 4, keytypes, fastcache,
-										  mcxt, &amop_strat_cache_funcs);
+										  AMOPSTRATEGY, 4, keytypes, 0,
+										  fastcache, mcxt,
+										  &amop_strat_cache_funcs);
 }
 
 
