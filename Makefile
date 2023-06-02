@@ -97,6 +97,7 @@ REGRESSCHECKS = btree_sys_check \
 				partition \
 				primary_key \
 				row_level_locks \
+				row_security \
 				subquery \
 				subtransactions \
 				tableam \
