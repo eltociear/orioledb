@@ -986,6 +986,30 @@ orioledb_parallelscan_estimate(Relation rel)
 	return sizeof(ParallelOScanDescData);
 }
 
+static void
+orioledb_parallelscan_initialize_internal(Relation rel,
+										  ParallelTableScanDesc pscan)
+{
+	ParallelOScanDesc poscan = (ParallelOScanDesc) pscan;
+
+	clear_fixed_shmem_key(&poscan->intPage[0].prevHikey);
+	clear_fixed_shmem_key(&poscan->intPage[1].prevHikey);
+	memset(poscan->intPage[0].img, 0, ORIOLEDB_BLCKSZ);
+	memset(poscan->intPage[1].img, 0, ORIOLEDB_BLCKSZ);
+	poscan->intPage[0].status = OParallelScanPageInvalid;
+	poscan->intPage[1].status = OParallelScanPageInvalid;
+	poscan->intPage[0].startOffset = 0;
+	poscan->intPage[1].startOffset = 0;
+	poscan->intPage[0].offset = 0;
+	poscan->intPage[1].offset = 0;
+	poscan->downlinksCount = 0;
+	poscan->workersReportedCount = 0;
+	poscan->flags = 0;
+	poscan->cur_int_pageno = 0;
+	poscan->dsmHandle = 0;
+	memset(poscan->worker_active, 0, sizeof(poscan->worker_active));
+}
+
 /* Modified copy of table_block_parallelscan_initialize */
 Size
 orioledb_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
@@ -1005,23 +1029,9 @@ orioledb_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 	LWLockInitialize(&poscan->intpageLoad, btreeScanShmem->pageLoadTrancheId);
 	LWLockInitialize(&poscan->downlinksSubscribe, btreeScanShmem->downlinksSubscribeTrancheId);
 	LWLockInitialize(&poscan->downlinksPublish, btreeScanShmem->downlinksPublishTrancheId);
-	clear_fixed_shmem_key(&poscan->intPage[0].prevHikey);
-	clear_fixed_shmem_key(&poscan->intPage[1].prevHikey);
-	memset(poscan->intPage[0].img, 0, ORIOLEDB_BLCKSZ);
-	memset(poscan->intPage[1].img, 0, ORIOLEDB_BLCKSZ);
-	poscan->intPage[0].status = OParallelScanPageInvalid;
-	poscan->intPage[1].status = OParallelScanPageInvalid;
-	poscan->intPage[0].startOffset = 0;
-	poscan->intPage[1].startOffset = 0;
-	poscan->intPage[0].offset = 0;
-	poscan->intPage[1].offset = 0;
-	poscan->downlinksCount = 0;
 	pg_atomic_init_u64(&poscan->downlinkIndex, 0);
-	poscan->workersReportedCount = 0;
-	poscan->flags = 0;
-	poscan->cur_int_pageno = 0;
-	poscan->dsmHandle = 0;
-	memset(poscan->worker_active, 0, sizeof(poscan->worker_active));
+
+	orioledb_parallelscan_initialize_internal(rel, pscan);
 
 	return sizeof(ParallelOScanDescData);
 }
@@ -1029,8 +1039,11 @@ orioledb_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 void
 orioledb_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	Assert(is_orioledb_rel(rel));
-	elog(ERROR, "Not implemented: %s", PG_FUNCNAME_MACRO);
+	if (!is_orioledb_rel(rel))
+		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("\"%s\" is not a orioledb table", NameStr(rel->rd_rel->relname))));
+
+	orioledb_parallelscan_initialize_internal(rel, pscan);
 }
 
 
@@ -1097,7 +1110,8 @@ orioledb_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 		free_btree_seq_scan(scan->scan);
 
 	o_btree_load_shmem(&GET_PRIMARY(descr)->desc);
-	scan->scan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, scan->csn, NULL);
+	scan->scan = make_btree_seq_scan(&GET_PRIMARY(descr)->desc, scan->csn,
+									 scan->rs_base.rs_parallel);
 }
 
 static void
