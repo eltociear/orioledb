@@ -1171,7 +1171,9 @@ build_secondary_index_worker_sort(oIdxSpool *btspool, void *bt_shared, Sharedsor
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 									 PROGRESS_BTREE_PHASE_PERFORMSORT_1);
+	o_set_syscache_hooks();
 	tuplesort_performsort(btspool->sortstates[0]);
+	o_reset_syscache_hooks();
 
 	/*
 	 * Done.  Record ambuild statistics, and whether we encountered a broken
@@ -1332,7 +1334,9 @@ build_secondary_index(OTable *o_table, OTableDescr *descr, OIndexNumber ix_num, 
 		heap_tuples = buildstate.btleader->btshared->reltuples;
 	}
 
+	o_set_syscache_hooks();
 	tuplesort_performsort(sortstate);
+	o_reset_syscache_hooks();
 
 	btree_write_index_data(&idx->desc, idx->leafTupdesc, sortstate,
 						   ctid, &fileHeader);
@@ -1467,6 +1471,7 @@ rebuild_indices(OTable *old_o_table, OTableDescr *old_descr,
 	ExecDropSingleTupleTableSlot(primarySlot);
 	free_btree_seq_scan(sscan);
 
+	o_set_syscache_hooks();
 	for (i = 0; i < descr->nIndices; i++)
 	{
 		idx = descr->indices[i];
@@ -1483,6 +1488,7 @@ rebuild_indices(OTable *old_o_table, OTableDescr *old_descr,
 	btree_write_index_data(&descr->toast->desc, descr->toast->leafTupdesc,
 						   toastSortState, 0, &toastFileHeader);
 	tuplesort_end(toastSortState);
+	o_reset_syscache_hooks();
 
 	/*
 	 * Write the file headers.  We need to write the correct checkpoint

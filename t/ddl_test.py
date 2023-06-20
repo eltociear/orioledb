@@ -63,3 +63,56 @@ class DDLTest(BaseTest):
 				con.execute("EXECUTE P0_5('-2841', '93929');")
 				con.commit()
 				con.execute("EXECUTE P0_5('3165', '17463');")
+
+	def test_non_trx_recreate_expr_index(self):
+
+		node = self.node
+		node.start()
+
+		con1 = node.connect()
+
+		con1.begin()
+
+		con1.execute("""
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+
+			CREATE TABLE o_test_1 (
+				val_1 int
+			) USING orioledb;
+
+			CREATE INDEX ind_1 ON o_test_1 ((val_1::text COLLATE "C"));
+
+			ALTER INDEX ind_1 ALTER COLUMN 1 SET STATISTICS 100;
+		""")
+
+		con1.commit()
+
+		con1.begin()
+		con1.commit()
+
+	def test_non_trx_recreate_partial_index(self):
+
+		node = self.node
+		node.start()
+
+		con1 = node.connect()
+
+		con1.begin()
+
+		con1.execute("""
+
+			CREATE EXTENSION IF NOT EXISTS orioledb;
+
+			CREATE TABLE o_test_1 (
+				val_1 int
+			) USING orioledb;
+
+			CREATE INDEX ind_1 ON o_test_1 (val_1) WHERE (val_1::text > 'a');
+
+			ALTER INDEX ind_1 SET (fillfactor=40);
+		""")
+
+		con1.commit()
+
+		con1.begin()
+		con1.commit()
