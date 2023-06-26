@@ -286,3 +286,11 @@
    ...
    fun:pg_popcount64_choose
 }
+
+{
+   strcmp optimization in pg_check_dir
+   Memcheck:Cond
+   fun:pg_check_dir
+   ...
+   fun:_PG_init
+}
