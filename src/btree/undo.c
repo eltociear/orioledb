@@ -1422,6 +1422,7 @@ remove_redundant_row_locks(BTreeLeafTuphdr *pageTuphdr,
 				prevUndoLoc = InvalidUndoLocation,
 				lastLockOnlyUndoLocation = InvalidUndoLocation;
 	UndoLocation retainedUndoLocation = get_snapshot_retained_undo_location();
+	int			prev_formatFlags = 0;
 
 	while ((!xactIsFinished || chainHasLocks) &&
 		   undoLocation >= retainedUndoLocation &&
@@ -1472,6 +1473,7 @@ remove_redundant_row_locks(BTreeLeafTuphdr *pageTuphdr,
 												   pageTuphdr,
 												   blkno);
 					}
+					tuphdr.formatFlags = prev_formatFlags;
 					update_leaf_header_in_undo(&tuphdr, prevUndoLoc);
 				}
 			}
@@ -1484,6 +1486,7 @@ remove_redundant_row_locks(BTreeLeafTuphdr *pageTuphdr,
 			lastLockOnlyUndoLocation = prevUndoLoc;
 
 		prevUndoLoc = undoLocation;
+		prev_formatFlags = tuphdr.formatFlags;
 		xactInfo = tuphdr.xactInfo;
 		xactIsFinished = XACT_INFO_IS_FINISHED(xactInfo);
 		undoLocation = tuphdr.undoLocation;
